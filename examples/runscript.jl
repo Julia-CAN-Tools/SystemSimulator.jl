@@ -55,16 +55,16 @@ function ccb(dc, inputs, outputs, dt)
     return nothing
 end
 
-crt = SS.SystemRuntime(cfg, sf, DummyController())
+runtime = SS.SystemRuntime(cfg, sf, DummyController())
 
-SS.start!(crt, ccb)
+SS.start!(runtime, ccb)
 
 RUN_SECONDS = 10.0
 @info "Running SystemSimulator example" run_seconds = RUN_SECONDS
 sleep(RUN_SECONDS)
 
 # Wake vcan1 once so blocking read can unwind immediately during shutdown.
-SS.request_stop!(crt.stop_signal)
+SS.request_stop!(runtime.stop_signal)
 _waker = CI.SocketCanDriver("vcan1")
 try
     CI.write(_waker, UInt32(0x18FF0000), ntuple(_ -> UInt8(0), 8))
@@ -74,5 +74,5 @@ finally
     CI.close(_waker)
 end
 
-@info "Stopping" steps = crt.step_count[] timestamp = crt.timestamp
-SS.stop!(crt)
+@info "Stopping" steps = runtime.step_count[] timestamp = runtime.timestamp
+SS.stop!(runtime)

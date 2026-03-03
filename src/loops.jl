@@ -133,8 +133,9 @@ function control_loop(runtime::SystemRuntime, control_callback::CF) where {CF<:F
                     runtime.outputs,
                     runtime.config.dt_ms / 1.0e3,
                 )
-                split_outputs!(runtime.outputs, runtime.io_states)
             end
+
+            split_outputs!(runtime.outputs, runtime.io_states)
 
             copy_to_logger!(runtime)
             isready(runtime.logger.loggerflag) || put!(runtime.logger.loggerflag, true)
@@ -149,6 +150,7 @@ function control_loop(runtime::SystemRuntime, control_callback::CF) where {CF<:F
         remaining_ns = period_ns - elapsed_ns
         remaining_ns > 0 && sleep(remaining_ns / 1.0e9)
     end
+
 
     @info "Control loop exiting" total_steps = runtime.step_count[]
     return nothing
