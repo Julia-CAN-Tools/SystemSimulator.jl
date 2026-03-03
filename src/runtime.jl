@@ -60,6 +60,7 @@ mutable struct SystemRuntime
     stop_signal::StopSignal
     controller
     logger::Logger
+    monitor::Union{TcpMonitor,Nothing}
 
     params::Dict{String,Float64}
     paramlock::ReentrantLock
@@ -70,6 +71,8 @@ mutable struct SystemRuntime
 
     control_task::Task
     logger_task::Task
+    monitor_reader_task::Task
+    monitor_writer_task::Task
 
     step_count::Threads.Atomic{Int}
     timestamp::Float64
@@ -137,18 +140,29 @@ function SystemRuntime(
     logger = Logger(config.logfile, 64, logger_keys)
     writeheader(logger)
 
+    # Build monitor if configured (uses same signal keys as logger)
+    monitor = nothing
+    if config.monitor !== nothing
+        mc = config.monitor
+        param_names = sort(collect(keys(params)))
+        monitor = TcpMonitor(mc.host, mc.in_port, mc.out_port, param_names, logger_keys)
+    end
+
     return SystemRuntime(
         config,
         io_states,
         stop_signal,
         controller,
         logger,
+        monitor,
         params,
         ReentrantLock(),
         inputs,
         ReentrantLock(),
         outputs,
         ReentrantLock(),
+        Task(() -> nothing),
+        Task(() -> nothing),
         Task(() -> nothing),
         Task(() -> nothing),
         Threads.Atomic{Int}(0),

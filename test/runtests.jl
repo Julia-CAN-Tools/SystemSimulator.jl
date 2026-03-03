@@ -1,4 +1,5 @@
 using Test
+using Sockets
 import SystemSimulator as SS
 import CANInterface as CI
 import CANUtils as CU
@@ -461,6 +462,189 @@ struct BareController end
         @test SS.stop_requested(runtime.stop_signal)
         @test runtime.control_task isa Task
         @test isfile(logfile)
+
+        rm(logfile; force=true)
+    end
+
+    # -----------------------------------------------------------------
+    # TcpMonitor tests
+    # -----------------------------------------------------------------
+
+    @testset "TcpMonitor output streaming" begin
+        io = MockIO(["Speed"], ["Command"])
+        logfile = tempname() * ".csv"
+        mcfg = SS.MonitorConfig("127.0.0.1", 0, 19200)
+        cfg = SS.SystemConfig(20, [SS.IOConfig(:io, io, 32)], logfile, mcfg)
+        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), TestController())
+
+        @test runtime.monitor !== nothing
+
+        function mon_cb(ctrl, inputs, outputs, dt)
+            outputs["io.Command"] = get(inputs, "io.Speed", 0.0) + 1.0
+            return nothing
+        end
+
+        SS.start!(runtime, mon_cb)
+        sleep(0.2)
+
+        # Connect to output port
+        sock = Sockets.connect("127.0.0.1", 19200)
+        sleep(0.15)
+
+        # Read handshake header
+        num_sigs = ltoh(read(sock, UInt32))
+        sig_names = String[]
+        for _ in 1:num_sigs
+            nlen = ltoh(read(sock, UInt16))
+            push!(sig_names, String(read(sock, nlen)))
+        end
+
+        # Header should contain Time + all inputs + all outputs + all params
+        @test "Time" in sig_names
+        @test "io.Speed" in sig_names
+        @test "io.Command" in sig_names
+        @test "gain" in sig_names
+
+        # Drain any stale frames buffered before injection
+        frame_bytes = num_sigs * 8
+        while bytesavailable(sock) >= frame_bytes
+            read(sock, frame_bytes)
+        end
+
+        # Inject a value and wait for it to propagate
+        inject_mock_frame!(io, Dict("Speed" => 50.0))
+        sleep(0.5)
+
+        # Read frames until we get the updated value (drain stale frames)
+        data = Dict{String,Float64}()
+        for _ in 1:50
+            buf = read(sock, frame_bytes)
+            values = ltoh.(reinterpret(Float64, buf))
+            data = Dict(zip(sig_names, values))
+            data["io.Speed"] ≈ 50.0 && break
+        end
+
+        @test data["Time"] > 0.0
+        @test data["io.Speed"] ≈ 50.0 atol = 1.0
+        @test data["io.Command"] ≈ 51.0 atol = 1.0
+
+        close(sock)
+        SS.stop!(runtime)
+        sleep(0.35)
+        rm(logfile; force=true)
+    end
+
+    @testset "TcpMonitor param input" begin
+        io = MockIO(["Speed"], String[])
+        logfile = tempname() * ".csv"
+        mcfg = SS.MonitorConfig("127.0.0.1", 19201, 0)
+        cfg = SS.SystemConfig(20, [SS.IOConfig(:io, io, 32, SS.IO_MODE_READONLY)], logfile, mcfg)
+        ctrl = TestController()  # has params["gain"] = 2.0
+        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), ctrl)
+
+        SS.start!(runtime, (c, i, o, d) -> nothing)
+        sleep(0.2)
+
+        # Connect to input port
+        sock = Sockets.connect("127.0.0.1", 19201)
+        sleep(0.15)
+
+        # Drain header
+        n = ltoh(read(sock, UInt32))
+        for _ in 1:n
+            nlen = ltoh(read(sock, UInt16))
+            read(sock, nlen)
+        end
+
+        # Send updated param: gain = 5.0
+        write(sock, reinterpret(UInt8, Float64[htol(5.0)]))
+        flush(sock)
+        sleep(0.3)
+
+        # Verify runtime.params updated (apply_monitor_params! in control loop)
+        @test runtime.params["gain"] ≈ 5.0 atol = 1e-6
+
+        # Verify controller.params updated
+        @test ctrl.params["gain"] ≈ 5.0 atol = 1e-6
+
+        close(sock)
+        SS.stop!(runtime)
+        sleep(0.35)
+        rm(logfile; force=true)
+    end
+
+    @testset "TcpMonitor bidirectional" begin
+        io = MockIO(["Speed"], ["Command"])
+        logfile = tempname() * ".csv"
+        mcfg = SS.MonitorConfig("127.0.0.1", 19202, 19203)
+        cfg = SS.SystemConfig(20, [SS.IOConfig(:io, io, 32)], logfile, mcfg)
+        ctrl = TestController()  # params["gain"] = 2.0
+        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), ctrl)
+
+        function gain_cb(c, inputs, outputs, dt)
+            outputs["io.Command"] = get(inputs, "io.Speed", 0.0) * c.params["gain"]
+            return nothing
+        end
+
+        SS.start!(runtime, gain_cb)
+        sleep(0.2)
+
+        # Connect param input
+        sock_in = Sockets.connect("127.0.0.1", 19202)
+        sleep(0.15)
+        n_in = ltoh(read(sock_in, UInt32))
+        for _ in 1:n_in
+            nlen = ltoh(read(sock_in, UInt16))
+            read(sock_in, nlen)
+        end
+
+        # Update gain to 3.0
+        write(sock_in, reinterpret(UInt8, Float64[htol(3.0)]))
+        flush(sock_in)
+
+        # Inject speed
+        inject_mock_frame!(io, Dict("Speed" => 10.0))
+        sleep(0.5)
+
+        # Connect output AFTER param and input are settled
+        sock_out = Sockets.connect("127.0.0.1", 19203)
+        sleep(0.15)
+        n_out = ltoh(read(sock_out, UInt32))
+        out_names = String[]
+        for _ in 1:n_out
+            nlen = ltoh(read(sock_out, UInt16))
+            push!(out_names, String(read(sock_out, nlen)))
+        end
+
+        # Read one frame
+        buf = read(sock_out, n_out * 8)
+        vals = ltoh.(reinterpret(Float64, buf))
+        data = Dict(zip(out_names, vals))
+
+        @test data["io.Speed"] ≈ 10.0 atol = 1.0
+        @test data["io.Command"] ≈ 30.0 atol = 1.0  # 10 * 3.0
+        @test data["gain"] ≈ 3.0 atol = 1e-6
+
+        close(sock_in)
+        close(sock_out)
+        SS.stop!(runtime)
+        sleep(0.35)
+        rm(logfile; force=true)
+    end
+
+    @testset "TcpMonitor stop closes cleanly" begin
+        io = MockIO(["S"], String[])
+        logfile = tempname() * ".csv"
+        mcfg = SS.MonitorConfig("127.0.0.1", 0, 19204)
+        cfg = SS.SystemConfig(20, [SS.IOConfig(:io, io, 32, SS.IO_MODE_READONLY)], logfile, mcfg)
+        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), BareController())
+
+        SS.start!(runtime, (c, i, o, d) -> nothing)
+        sleep(0.2)
+
+        SS.stop!(runtime)
+        sleep(0.35)
+        @test runtime.monitor.closed[]
 
         rm(logfile; force=true)
     end

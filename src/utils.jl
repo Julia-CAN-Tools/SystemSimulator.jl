@@ -74,3 +74,61 @@ function copy_to_logger!(runtime::SystemRuntime)
     end
     return nothing
 end
+
+"""
+    copy_to_monitor!(runtime)
+
+Copy runtime snapshots into monitor dictionary for TCP streaming.
+Mirrors `copy_to_logger!`.
+"""
+function copy_to_monitor!(runtime::SystemRuntime)
+    mon = runtime.monitor
+    mon === nothing && return nothing
+    lock(mon.monitorlock) do
+        lock(runtime.inputlock) do
+            for (key, value) in runtime.inputs
+                mon.monitordict[key] = value
+            end
+        end
+        lock(runtime.outputlock) do
+            for (key, value) in runtime.outputs
+                mon.monitordict[key] = value
+            end
+        end
+        lock(runtime.paramlock) do
+            for (key, value) in runtime.params
+                mon.monitordict[key] = value
+            end
+        end
+        mon.monitordict["Time"] = runtime.timestamp
+    end
+    return nothing
+end
+
+"""
+    apply_monitor_params!(runtime)
+
+Apply staged param updates from the TCP monitor into `runtime.params` and
+`controller.params`. Called by control loop before each callback invocation.
+"""
+function apply_monitor_params!(runtime::SystemRuntime)
+    mon = runtime.monitor
+    mon === nothing && return nothing
+    lock(mon.param_lock) do
+        lock(runtime.paramlock) do
+            for (name, value) in mon.param_updates
+                runtime.params[name] = value
+            end
+        end
+        ctrl = runtime.controller
+        if hasproperty(ctrl, :params)
+            ctrl_params = getproperty(ctrl, :params)
+            for (name, value) in mon.param_updates
+                if haskey(ctrl_params, name)
+                    ctrl_params[name] = value
+                end
+            end
+        end
+    end
+    return nothing
+end

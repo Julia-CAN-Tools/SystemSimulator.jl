@@ -8,12 +8,14 @@ multiple bidirectional IO transports.
 import CANInterface as CI
 import CANUtils as CU
 import Dates
+import Sockets
 
 include("stopsignal.jl")
 include("logger.jl")
 include("IO/abstractIO.jl")
 include("IO/canIO.jl")
 include("config.jl")
+include("tcpmonitor.jl")
 include("runtime.jl")
 include("utils.jl")
 include("loops.jl")
@@ -25,6 +27,7 @@ export AbstractController,
        IO_MODE_READONLY,
        IO_MODE_WRITEONLY,
        IOConfig,
+       MonitorConfig,
        SystemConfig,
        IOState,
        SystemRuntime,
@@ -48,6 +51,7 @@ export AbstractController,
        write_raw,
        input_signal_names,
        output_signal_names,
+       TcpMonitor,
        start!,
        stop!
 

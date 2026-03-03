@@ -1,4 +1,26 @@
 """
+    MonitorConfig
+
+Configuration for the optional TCP monitor that streams all runtime data
+to a GUI and receives parameter updates.
+"""
+struct MonitorConfig
+    host::String
+    in_port::Int
+    out_port::Int
+
+    function MonitorConfig(host::AbstractString, in_port::Integer, out_port::Integer)
+        in_port >= 0 || throw(ArgumentError("in_port must be >= 0"))
+        out_port >= 0 || throw(ArgumentError("out_port must be >= 0"))
+        in_port > 0 || out_port > 0 || throw(ArgumentError("At least one port must be > 0"))
+        return new(String(host), Int(in_port), Int(out_port))
+    end
+end
+
+MonitorConfig(; host::AbstractString="0.0.0.0", in_port::Integer=0, out_port::Integer=0) =
+    MonitorConfig(host, in_port, out_port)
+
+"""
     IOConfig
 
 Configuration for one bidirectional IO endpoint.
@@ -53,10 +75,16 @@ struct SystemConfig
     dt_ms::Int
     ios::Vector{IOConfig}
     logfile::String
+    monitor::Union{MonitorConfig,Nothing}
 
-    function SystemConfig(dt_ms::Int, ios::Vector{IOConfig}, logfile::String)
+    function SystemConfig(
+        dt_ms::Int,
+        ios::Vector{IOConfig},
+        logfile::String,
+        monitor::Union{MonitorConfig,Nothing}=nothing,
+    )
         dt_ms > 0 || throw(ArgumentError("dt_ms must be > 0"))
-        return new(dt_ms, ios, logfile)
+        return new(dt_ms, ios, logfile, monitor)
     end
 end
 

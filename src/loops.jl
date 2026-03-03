@@ -122,6 +122,9 @@ function control_loop(runtime::SystemRuntime, control_callback::CF) where {CF<:F
         cycle_start = time_ns()
 
         try
+            # Apply param updates from monitor (before gathering inputs)
+            apply_monitor_params!(runtime)
+
             lock(runtime.inputlock) do
                 gather_inputs!(runtime.inputs, runtime.io_states)
             end
@@ -139,6 +142,12 @@ function control_loop(runtime::SystemRuntime, control_callback::CF) where {CF<:F
 
             copy_to_logger!(runtime)
             isready(runtime.logger.loggerflag) || put!(runtime.logger.loggerflag, true)
+
+            # Copy to monitor and signal (mirrors logger pattern)
+            if runtime.monitor !== nothing
+                copy_to_monitor!(runtime)
+                isready(runtime.monitor.monitorflag) || put!(runtime.monitor.monitorflag, true)
+            end
 
             runtime.timestamp += runtime.config.dt_ms / 1.0e3
             Threads.atomic_add!(runtime.step_count, 1)
@@ -202,6 +211,16 @@ function start!(runtime::SystemRuntime, control_callback::Function)
 
     runtime.control_task = Threads.@spawn control_loop(runtime, control_callback)
     runtime.logger_task = Threads.@spawn logger_loop(runtime.stop_signal, runtime.logger)
+
+    if runtime.monitor !== nothing
+        mon = runtime.monitor
+        if mon.in_server !== nothing
+            runtime.monitor_reader_task = Threads.@spawn monitor_reader_loop(mon, runtime.stop_signal)
+        end
+        if mon.out_server !== nothing
+            runtime.monitor_writer_task = Threads.@spawn monitor_writer_loop(mon, runtime.stop_signal)
+        end
+    end
     return nothing
 end
 
@@ -227,6 +246,14 @@ function stop!(runtime::SystemRuntime)
         put!(runtime.logger.loggerflag, true)
     end
 
+    # Close monitor TCP resources and signal its writer
+    if runtime.monitor !== nothing
+        close_monitor!(runtime.monitor)
+        if isopen(runtime.monitor.monitorflag) && !isready(runtime.monitor.monitorflag)
+            put!(runtime.monitor.monitorflag, true)
+        end
+    end
+
     sleep(0.2)
 
     for state in runtime.io_states
@@ -235,5 +262,9 @@ function stop!(runtime::SystemRuntime)
     end
 
     isopen(runtime.logger.loggerflag) && close(runtime.logger.loggerflag)
+
+    if runtime.monitor !== nothing
+        isopen(runtime.monitor.monitorflag) && close(runtime.monitor.monitorflag)
+    end
     return nothing
 end
