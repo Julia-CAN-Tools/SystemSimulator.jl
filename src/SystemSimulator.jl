@@ -19,6 +19,7 @@ include("tcpmonitor.jl")
 include("runtime.jl")
 include("utils.jl")
 include("loops.jl")
+include("lifecycle.jl")
 
 export AbstractController,
        AbstractIO,
@@ -52,6 +53,8 @@ export AbstractController,
        input_signal_names,
        output_signal_names,
        TcpMonitor,
+       ControllerLifecycle,
+       update_lifecycle!,
        start!,
        stop!
 
