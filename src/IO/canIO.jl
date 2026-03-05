@@ -25,6 +25,12 @@ function CanIO(
     return CanIO(driver, rx_catalog, R[])
 end
 
+function read_raw(io::CanIO{<:CI.SocketCanDriver})
+    # Poll with a bounded timeout so reader loops can observe stop requests
+    # even when no CAN traffic is present.
+    return CI.read(io.driver; timeout_ms=10)
+end
+
 function read_raw(io::CanIO)
     return CI.read(io.driver)
 end

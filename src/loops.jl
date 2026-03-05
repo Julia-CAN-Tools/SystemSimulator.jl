@@ -155,7 +155,7 @@ function control_loop(runtime::SystemRuntime, control_callback::CF) where {CF<:F
             @error "Control loop error" exception = (err, catch_backtrace())
         end
 
-        elapsed_ns = time_ns() - cycle_start
+        elapsed_ns = Int64(time_ns() - cycle_start)
         remaining_ns = period_ns - elapsed_ns
         remaining_ns > 0 && sleep(remaining_ns / 1.0e9)
     end
