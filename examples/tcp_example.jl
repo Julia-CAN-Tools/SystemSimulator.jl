@@ -44,6 +44,8 @@ cycle, and applies parameter updates received from the GUI.
     # param_names are sorted alphabetically: ["Kp", "setpoint"]
     s2.sendall(struct.pack('<2d', 1.5, 1200.0))  # Kp=1.5, setpoint=1200
 """
+
+
 import SystemSimulator as SS
 
 # ---------------------------------------------------------------------------
