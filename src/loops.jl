@@ -3,7 +3,7 @@
 
 Blocking task that reads raw payloads and enqueues them for parsing.
 """
-function reader_loop(state::IOState, stop_signal::StopSignal)
+function reader_loop(state::IOState{IO,RAW}, stop_signal::StopSignal) where {IO,RAW}
     is_read_enabled(state.config) || return nothing
     @info "Reader loop started" io = state.config.name
     try
@@ -42,7 +42,7 @@ end
 
 Consumes raw payloads, decodes signals, and publishes local snapshots.
 """
-function parser_loop(state::IOState, stop_signal::StopSignal)
+function parser_loop(state::IOState{IO,RAW}, stop_signal::StopSignal) where {IO,RAW}
     is_read_enabled(state.config) || return nothing
     @info "Parser loop started" io = state.config.name
     while !stop_requested(stop_signal)
@@ -78,7 +78,7 @@ end
 
 Encodes local outputs and writes them to transport.
 """
-function writer_loop(state::IOState, stop_signal::StopSignal)
+function writer_loop(state::IOState{IO,RAW}, stop_signal::StopSignal) where {IO,RAW}
     is_write_enabled(state.config) || return nothing
     @info "Writer loop started" io = state.config.name
     while !stop_requested(stop_signal)
@@ -114,7 +114,7 @@ end
 Single deterministic loop that gathers snapshots, invokes system callback,
 and publishes outputs to IO writers.
 """
-function system_loop(runtime::SystemRuntime, system_callback::CF) where {CF<:Function}
+function system_loop(runtime::SystemRuntime{S,IO,RAW,MON}, system_callback::CF) where {S, IO<:AbstractIO, RAW, MON, CF<:Function}
     period_ns = convert(Dates.Nanosecond, Dates.Millisecond(runtime.config.dt_ms)).value
     @info "System loop started" period_ms = runtime.config.dt_ms
 
@@ -198,7 +198,7 @@ function logger_loop(stop_signal::StopSignal, logger::Logger)
     return nothing
 end
 
-function start!(runtime::SystemRuntime, system_callback::Function)
+function start!(runtime::SystemRuntime{S,IO,RAW,MON}, system_callback::CF) where {S, IO<:AbstractIO, RAW, MON, CF<:Function}
     for state in runtime.io_states
         if is_read_enabled(state.config)
             state.reader_task = Threads.@spawn reader_loop(state, runtime.stop_signal)

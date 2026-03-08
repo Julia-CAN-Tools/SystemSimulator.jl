@@ -46,20 +46,20 @@ end
 is_read_enabled(mode::Symbol) = mode != IO_MODE_WRITEONLY
 is_write_enabled(mode::Symbol) = mode != IO_MODE_READONLY
 
-struct IOConfig
+struct IOConfig{IO<:AbstractIO}
     name::Symbol
-    io::AbstractIO
+    io::IO
     channel_length::Int
     mode::Symbol
 
     function IOConfig(
         name::Symbol,
-        io::AbstractIO,
+        io::IO,
         channel_length::Int,
         mode::Symbol=IO_MODE_READWRITE,
-    )
+    ) where {IO<:AbstractIO}
         channel_length > 0 || throw(ArgumentError("channel_length must be > 0"))
-        return new(name, io, channel_length, validate_io_mode(mode))
+        return new{IO}(name, io, channel_length, validate_io_mode(mode))
     end
 end
 
@@ -71,20 +71,20 @@ is_write_enabled(cfg::IOConfig) = is_write_enabled(cfg.mode)
 
 Top-level simulator configuration.
 """
-struct SystemConfig
+struct SystemConfig{IO<:AbstractIO}
     dt_ms::Int
-    ios::Vector{IOConfig}
+    ios::Vector{IOConfig{IO}}
     logfile::String
     monitor::Union{MonitorConfig,Nothing}
 
     function SystemConfig(
         dt_ms::Int,
-        ios::Vector{IOConfig},
+        ios::Vector{IOConfig{IO}},
         logfile::String,
         monitor::Union{MonitorConfig,Nothing}=nothing,
-    )
+    ) where {IO<:AbstractIO}
         dt_ms > 0 || throw(ArgumentError("dt_ms must be > 0"))
-        return new(dt_ms, ios, logfile, monitor)
+        return new{IO}(dt_ms, ios, logfile, monitor)
     end
 end
 

@@ -15,7 +15,7 @@ end
 
 Collect per-IO snapshots into namespaced global inputs.
 """
-function gather_inputs!(inputs::Dict{String,Float64}, io_states::Vector{IOState})
+function gather_inputs!(inputs::Dict{String,Float64}, io_states::Vector{IOState{IO,RAW}}) where {IO,RAW}
     for state in io_states
         is_read_enabled(state.config) || continue
         lock(state.inputlock)
@@ -35,7 +35,7 @@ end
 
 Project namespaced global outputs into each IO local output dictionary.
 """
-function split_outputs!(outputs::Dict{String,Float64}, io_states::Vector{IOState})
+function split_outputs!(outputs::Dict{String,Float64}, io_states::Vector{IOState{IO,RAW}}) where {IO,RAW}
     for state in io_states
         is_write_enabled(state.config) || continue
         lock(state.outlock) do
@@ -122,7 +122,7 @@ function apply_monitor_params!(runtime::SystemRuntime)
         end
         ctrl = runtime.system
         if hasproperty(ctrl, :params)
-            ctrl_params = getproperty(ctrl, :params)
+            ctrl_params = getproperty(ctrl, :params)::Dict{String,Float64}
             for (name, value) in mon.param_updates
                 if haskey(ctrl_params, name)
                     ctrl_params[name] = value

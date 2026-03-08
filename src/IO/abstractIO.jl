@@ -13,6 +13,15 @@ Concrete IO types must:
 abstract type AbstractIO end
 
 """
+    raw_payload_type(::Type{IO}) -> Type
+
+Return the concrete type of values produced by `read_raw` for IO type `IO`.
+Used to specialize the IOState rx_queue channel.
+Default: `Any` (works for test/mock IOs).
+"""
+raw_payload_type(::Type{<:AbstractIO}) = Any
+
+"""
     read_raw(io::AbstractIO)
 
 Read one raw payload from transport, or `nothing` when no payload is available.

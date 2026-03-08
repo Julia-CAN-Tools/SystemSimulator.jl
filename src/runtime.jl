@@ -5,9 +5,9 @@ abstract type AbstractSystem end
 
 Per-IO runtime state for reader/parser/writer tasks and local signal dictionaries.
 """
-mutable struct IOState
-    config::IOConfig
-    rx_queue::Channel{Any}
+mutable struct IOState{IO<:AbstractIO, RAW}
+    config::IOConfig{IO}
+    rx_queue::Channel{RAW}
     input_local_rx::Dict{String,Float64}
     input_local_snapshot::Dict{String,Float64}
     output_local::Dict{String,Float64}
@@ -20,7 +20,8 @@ mutable struct IOState
     parser_task::Task
     writer_task::Task
 
-    function IOState(config::IOConfig)
+    function IOState(config::IOConfig{IO}) where {IO<:AbstractIO}
+        RAW = raw_payload_type(IO)
         input_names = is_read_enabled(config) ? unique(input_signal_names(config.io)) : String[]
         output_names = is_write_enabled(config) ? unique(output_signal_names(config.io)) : String[]
 
@@ -31,9 +32,9 @@ mutable struct IOState
         input_keymap = build_keymap(config.name, input_names)
         output_keymap = build_keymap(config.name, output_names)
 
-        return new(
+        return new{IO,RAW}(
             config,
-            Channel{Any}(config.channel_length),
+            Channel{RAW}(config.channel_length),
             input_local_rx,
             input_local_snapshot,
             output_local,
@@ -54,13 +55,13 @@ end
 
 Aggregate runtime bundle for lifecycle management.
 """
-mutable struct SystemRuntime
-    config::SystemConfig
-    io_states::Vector{IOState}
+mutable struct SystemRuntime{S, IO<:AbstractIO, RAW, MON}
+    config::SystemConfig{IO}
+    io_states::Vector{IOState{IO,RAW}}
     stop_signal::StopSignal
-    system
+    system::S
     logger::Logger
-    monitor::Union{TcpMonitor,Nothing}
+    monitor::MON
 
     params::Dict{String,Float64}
     paramlock::ReentrantLock
@@ -87,12 +88,12 @@ end
 
 function system_params(system)::Dict{String,Float64}
     if hasproperty(system, :params)
-        return _as_float64_dict(getproperty(system, :params))
+        return _as_float64_dict(getproperty(system, :params)::AbstractDict)
     end
     return Dict{String,Float64}()
 end
 
-function _build_global_inputs(io_states::Vector{IOState})::Dict{String,Float64}
+function _build_global_inputs(io_states::Vector{IOState{IO,RAW}})::Dict{String,Float64} where {IO,RAW}
     global_inputs = Dict{String,Float64}()
     for state in io_states
         is_read_enabled(state.config) || continue
@@ -103,7 +104,7 @@ function _build_global_inputs(io_states::Vector{IOState})::Dict{String,Float64}
     return global_inputs
 end
 
-function _build_global_outputs(io_states::Vector{IOState})::Dict{String,Float64}
+function _build_global_outputs(io_states::Vector{IOState{IO,RAW}})::Dict{String,Float64} where {IO,RAW}
     global_outputs = Dict{String,Float64}()
     for state in io_states
         is_write_enabled(state.config) || continue
@@ -127,11 +128,11 @@ function _build_logger_keys(
 end
 
 function SystemRuntime(
-    config::SystemConfig,
-    io_states::Vector{IOState},
+    config::SystemConfig{IO},
+    io_states::Vector{IOState{IO,RAW}},
     stop_signal::StopSignal,
-    system,
-)
+    system::S,
+) where {S, IO<:AbstractIO, RAW}
     params = system_params(system)
     inputs = _build_global_inputs(io_states)
     outputs = _build_global_outputs(io_states)
@@ -141,14 +142,16 @@ function SystemRuntime(
     writeheader(logger)
 
     # Build monitor if configured (uses same signal keys as logger)
-    monitor = nothing
-    if config.monitor !== nothing
+    monitor = if config.monitor !== nothing
         mc = config.monitor
         param_names = sort(collect(keys(params)))
-        monitor = TcpMonitor(mc.host, mc.in_port, mc.out_port, param_names, logger_keys)
+        TcpMonitor(mc.host, mc.in_port, mc.out_port, param_names, logger_keys)
+    else
+        nothing
     end
+    MON = typeof(monitor)   # TcpMonitor or Nothing — always concrete
 
-    return SystemRuntime(
+    return SystemRuntime{S,IO,RAW,MON}(
         config,
         io_states,
         stop_signal,
@@ -170,7 +173,8 @@ function SystemRuntime(
     )
 end
 
-function SystemRuntime(config::SystemConfig, stop_signal::StopSignal, system)
-    io_states = [IOState(io_cfg) for io_cfg in config.ios]
+function SystemRuntime(config::SystemConfig{IO}, stop_signal::StopSignal, system::S) where {S, IO<:AbstractIO}
+    RAW = raw_payload_type(IO)
+    io_states = IOState{IO,RAW}[IOState(io_cfg) for io_cfg in config.ios]
     return SystemRuntime(config, io_states, stop_signal, system)
 end
