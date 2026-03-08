@@ -1,12 +1,12 @@
 """
-    ControllerLifecycle
+    SystemLifecycle
 
-Reusable start/stop/duration lifecycle for controllers.
+Reusable start/stop/duration lifecycle for systems.
 
 Handles rising-edge detection on `start_cmd`/`stop_cmd` counters,
 elapsed time tracking, and duration-based auto-stop.
 
-Usage in a controller callback:
+Usage in a system callback:
 ```julia
 event = update_lifecycle!(ctrl.lifecycle, ctrl.params, dt_s)
 if event == :started
@@ -17,14 +17,14 @@ if ctrl.lifecycle.active
 end
 ```
 """
-mutable struct ControllerLifecycle
+mutable struct SystemLifecycle
     prev_start_cmd::Float64
     prev_stop_cmd::Float64
     active::Bool
     elapsed::Float64
 end
 
-ControllerLifecycle() = ControllerLifecycle(0.0, 0.0, false, 0.0)
+SystemLifecycle() = SystemLifecycle(0.0, 0.0, false, 0.0)
 
 """
     update_lifecycle!(lc, params, dt_s) -> event::Symbol
@@ -37,7 +37,7 @@ Call at the top of every control callback. Returns one of:
 
 Updates `params["running"]` and `params["elapsed"]` in-place.
 """
-function update_lifecycle!(lc::ControllerLifecycle, params::Dict{String,Float64}, dt_s::Float64)
+function update_lifecycle!(lc::SystemLifecycle, params::Dict{String,Float64}, dt_s::Float64)
     start_cmd = get(params, "start_cmd", 0.0)
     stop_cmd  = get(params, "stop_cmd", 0.0)
     duration  = get(params, "duration", Inf)

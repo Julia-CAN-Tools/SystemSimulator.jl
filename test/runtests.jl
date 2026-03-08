@@ -154,12 +154,12 @@ const TEST_TX_CATALOG = CP.CanMessage[
     ),
 ]
 
-struct TestController <: SS.AbstractController
+struct TestSystem <: SS.AbstractSystem
     params::Dict{String,Float64}
 end
-TestController() = TestController(Dict{String,Float64}("gain" => 2.0))
+TestSystem() = TestSystem(Dict{String,Float64}("gain" => 2.0))
 
-struct BareController end
+struct BareSystem end
 
 # -----------------------------------------------------------------------------
 # Tests
@@ -228,7 +228,7 @@ struct BareController end
 
         logfile = tempname() * ".csv"
         syscfg = SS.SystemConfig(20, [cfg], logfile)
-        runtime = SS.SystemRuntime(syscfg, SS.StopSignal(), TestController())
+        runtime = SS.SystemRuntime(syscfg, SS.StopSignal(), TestSystem())
 
         @test haskey(runtime.inputs, "ioA.Speed")
         @test haskey(runtime.outputs, "ioA.Command")
@@ -240,11 +240,11 @@ struct BareController end
         rm(logfile; force=true)
     end
 
-    @testset "controller_params fallback" begin
+    @testset "system_params fallback" begin
         logfile = tempname() * ".csv"
         io_a = MockIO(["Speed"], ["Command"])
         cfg = SS.SystemConfig(20, [SS.IOConfig(:ioA, io_a, 16)], logfile)
-        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), BareController())
+        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), BareSystem())
         @test isempty(runtime.params)
 
         close(runtime.logger.filehandle)
@@ -255,7 +255,7 @@ struct BareController end
         io_a = MockIO(["Speed"], ["Command"])
         logfile = tempname() * ".csv"
         cfg = SS.SystemConfig(20, [SS.IOConfig(:ioA, io_a, 32)], logfile)
-        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), TestController())
+        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), TestSystem())
 
         function passthrough_callback(ctrl, inputs, outputs, dt)
             outputs["ioA.Command"] = get(inputs, "ioA.Speed", 0.0)
@@ -270,7 +270,7 @@ struct BareController end
             runtime.io_states[1].reader_task,
             runtime.io_states[1].parser_task,
             runtime.io_states[1].writer_task,
-            runtime.control_task,
+            runtime.system_task,
             runtime.logger_task,
         ]
         @test length(all_tasks) == 3 * length(runtime.io_states) + 2
@@ -296,7 +296,7 @@ struct BareController end
             [SS.IOConfig(:ioA, io_a, 32), SS.IOConfig(:ioB, io_b, 32)],
             logfile,
         )
-        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), TestController())
+        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), TestSystem())
 
         function noop_callback(ctrl, inputs, outputs, dt)
             return nothing
@@ -327,7 +327,7 @@ struct BareController end
             [SS.IOConfig(:rx, io_rx, 32), SS.IOConfig(:tx, io_tx, 32)],
             logfile,
         )
-        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), TestController())
+        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), TestSystem())
 
         function bridge_callback(ctrl, inputs, outputs, dt)
             outputs["tx.Command"] = get(inputs, "rx.Speed", 0.0)
@@ -361,7 +361,7 @@ struct BareController end
             ],
             logfile,
         )
-        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), TestController())
+        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), TestSystem())
 
         @test haskey(runtime.inputs, "rx.Speed")
         @test !haskey(runtime.inputs, "tx.Command")
@@ -412,7 +412,7 @@ struct BareController end
             [SS.IOConfig(:rx, rx_io, 64), SS.IOConfig(:tx, tx_io, 64)],
             logfile,
         )
-        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), TestController())
+        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), TestSystem())
 
         function can_callback(ctrl, inputs, outputs, dt)
             outputs["tx.ReqSpeed_SpeedLimit"] = get(inputs, "rx.EngineSpeed", 0.0)
@@ -445,7 +445,7 @@ struct BareController end
 
         logfile = tempname() * ".csv"
         cfg = SS.SystemConfig(20, [SS.IOConfig(:ioA, io, 32)], logfile)
-        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), TestController())
+        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), TestSystem())
 
         function noisy_callback(ctrl, inputs, outputs, dt)
             outputs["ioA.Command"] = get(inputs, "ioA.Speed", 0.0) + 1.0
@@ -460,7 +460,7 @@ struct BareController end
         sleep(0.35)
 
         @test SS.stop_requested(runtime.stop_signal)
-        @test runtime.control_task isa Task
+        @test runtime.system_task isa Task
         @test isfile(logfile)
 
         rm(logfile; force=true)
@@ -475,7 +475,7 @@ struct BareController end
         logfile = tempname() * ".csv"
         mcfg = SS.MonitorConfig("127.0.0.1", 0, 19200)
         cfg = SS.SystemConfig(20, [SS.IOConfig(:io, io, 32)], logfile, mcfg)
-        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), TestController())
+        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), TestSystem())
 
         @test runtime.monitor !== nothing
 
@@ -539,7 +539,7 @@ struct BareController end
         logfile = tempname() * ".csv"
         mcfg = SS.MonitorConfig("127.0.0.1", 19201, 0)
         cfg = SS.SystemConfig(20, [SS.IOConfig(:io, io, 32, SS.IO_MODE_READONLY)], logfile, mcfg)
-        ctrl = TestController()  # has params["gain"] = 2.0
+        ctrl = TestSystem()  # has params["gain"] = 2.0
         runtime = SS.SystemRuntime(cfg, SS.StopSignal(), ctrl)
 
         SS.start!(runtime, (c, i, o, d) -> nothing)
@@ -578,7 +578,7 @@ struct BareController end
         logfile = tempname() * ".csv"
         mcfg = SS.MonitorConfig("127.0.0.1", 19202, 19203)
         cfg = SS.SystemConfig(20, [SS.IOConfig(:io, io, 32)], logfile, mcfg)
-        ctrl = TestController()  # params["gain"] = 2.0
+        ctrl = TestSystem()  # params["gain"] = 2.0
         runtime = SS.SystemRuntime(cfg, SS.StopSignal(), ctrl)
 
         function gain_cb(c, inputs, outputs, dt)
@@ -637,7 +637,7 @@ struct BareController end
         logfile = tempname() * ".csv"
         mcfg = SS.MonitorConfig("127.0.0.1", 0, 19204)
         cfg = SS.SystemConfig(20, [SS.IOConfig(:io, io, 32, SS.IO_MODE_READONLY)], logfile, mcfg)
-        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), BareController())
+        runtime = SS.SystemRuntime(cfg, SS.StopSignal(), BareSystem())
 
         SS.start!(runtime, (c, i, o, d) -> nothing)
         sleep(0.2)

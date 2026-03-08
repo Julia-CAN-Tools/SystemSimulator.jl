@@ -1,4 +1,4 @@
-abstract type AbstractController end
+abstract type AbstractSystem end
 
 """
     IOState
@@ -58,7 +58,7 @@ mutable struct SystemRuntime
     config::SystemConfig
     io_states::Vector{IOState}
     stop_signal::StopSignal
-    controller
+    system
     logger::Logger
     monitor::Union{TcpMonitor,Nothing}
 
@@ -69,7 +69,7 @@ mutable struct SystemRuntime
     outputs::Dict{String,Float64}
     outputlock::ReentrantLock
 
-    control_task::Task
+    system_task::Task
     logger_task::Task
     monitor_reader_task::Task
     monitor_writer_task::Task
@@ -85,9 +85,9 @@ function _as_float64_dict(values)::Dict{String,Float64}
     return Dict{String,Float64}()
 end
 
-function controller_params(controller)::Dict{String,Float64}
-    if hasproperty(controller, :params)
-        return _as_float64_dict(getproperty(controller, :params))
+function system_params(system)::Dict{String,Float64}
+    if hasproperty(system, :params)
+        return _as_float64_dict(getproperty(system, :params))
     end
     return Dict{String,Float64}()
 end
@@ -130,9 +130,9 @@ function SystemRuntime(
     config::SystemConfig,
     io_states::Vector{IOState},
     stop_signal::StopSignal,
-    controller,
+    system,
 )
-    params = controller_params(controller)
+    params = system_params(system)
     inputs = _build_global_inputs(io_states)
     outputs = _build_global_outputs(io_states)
 
@@ -152,7 +152,7 @@ function SystemRuntime(
         config,
         io_states,
         stop_signal,
-        controller,
+        system,
         logger,
         monitor,
         params,
@@ -170,7 +170,7 @@ function SystemRuntime(
     )
 end
 
-function SystemRuntime(config::SystemConfig, stop_signal::StopSignal, controller)
+function SystemRuntime(config::SystemConfig, stop_signal::StopSignal, system)
     io_states = [IOState(io_cfg) for io_cfg in config.ios]
-    return SystemRuntime(config, io_states, stop_signal, controller)
+    return SystemRuntime(config, io_states, stop_signal, system)
 end

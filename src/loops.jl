@@ -109,14 +109,14 @@ function writer_loop(state::IOState, stop_signal::StopSignal)
 end
 
 """
-    control_loop(runtime, control_callback)
+    system_loop(runtime, system_callback)
 
-Single deterministic loop that gathers snapshots, invokes control callback,
+Single deterministic loop that gathers snapshots, invokes system callback,
 and publishes outputs to IO writers.
 """
-function control_loop(runtime::SystemRuntime, control_callback::CF) where {CF<:Function}
+function system_loop(runtime::SystemRuntime, system_callback::CF) where {CF<:Function}
     period_ns = convert(Dates.Nanosecond, Dates.Millisecond(runtime.config.dt_ms)).value
-    @info "Control loop started" period_ms = runtime.config.dt_ms
+    @info "System loop started" period_ms = runtime.config.dt_ms
 
     while !stop_requested(runtime.stop_signal)
         cycle_start = time_ns()
@@ -130,8 +130,8 @@ function control_loop(runtime::SystemRuntime, control_callback::CF) where {CF<:F
             end
 
             lock(runtime.outputlock) do
-                control_callback(
-                    runtime.controller,
+                system_callback(
+                    runtime.system,
                     runtime.inputs,
                     runtime.outputs,
                     runtime.config.dt_ms / 1.0e3,
@@ -152,7 +152,7 @@ function control_loop(runtime::SystemRuntime, control_callback::CF) where {CF<:F
             runtime.timestamp += runtime.config.dt_ms / 1.0e3
             Threads.atomic_add!(runtime.step_count, 1)
         catch err
-            @error "Control loop error" exception = (err, catch_backtrace())
+            @error "System loop error" exception = (err, catch_backtrace())
         end
 
         elapsed_ns = Int64(time_ns() - cycle_start)
@@ -161,7 +161,7 @@ function control_loop(runtime::SystemRuntime, control_callback::CF) where {CF<:F
     end
 
 
-    @info "Control loop exiting" total_steps = runtime.step_count[]
+    @info "System loop exiting" total_steps = runtime.step_count[]
     return nothing
 end
 
@@ -198,7 +198,7 @@ function logger_loop(stop_signal::StopSignal, logger::Logger)
     return nothing
 end
 
-function start!(runtime::SystemRuntime, control_callback::Function)
+function start!(runtime::SystemRuntime, system_callback::Function)
     for state in runtime.io_states
         if is_read_enabled(state.config)
             state.reader_task = Threads.@spawn reader_loop(state, runtime.stop_signal)
@@ -209,7 +209,7 @@ function start!(runtime::SystemRuntime, control_callback::Function)
         end
     end
 
-    runtime.control_task = Threads.@spawn control_loop(runtime, control_callback)
+    runtime.system_task = Threads.@spawn system_loop(runtime, system_callback)
     runtime.logger_task = Threads.@spawn logger_loop(runtime.stop_signal, runtime.logger)
 
     if runtime.monitor !== nothing

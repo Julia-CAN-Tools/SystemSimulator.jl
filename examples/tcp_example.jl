@@ -64,22 +64,22 @@ SS.output_signal_names(::VirtualIO)::Vector{String} = String[]
 Base.close(io::VirtualIO)::Nothing = (io.closed = true; nothing)
 
 # ---------------------------------------------------------------------------
-# Controller — params are tunable from GUI via TcpMonitor
+# System — params are tunable from GUI via TcpMonitor
 # ---------------------------------------------------------------------------
-mutable struct DemoController <: SS.AbstractController
+mutable struct DemoSystem <: SS.AbstractSystem
     params::Dict{String,Float64}
     time::Float64
 end
 
-DemoController() = DemoController(
+DemoSystem() = DemoSystem(
     Dict{String,Float64}("Kp" => 1.0, "setpoint" => 0.0),
     0.0,
 )
 
 # ---------------------------------------------------------------------------
-# Control callback
+# System callback
 # ---------------------------------------------------------------------------
-function demo_callback(ctrl::DemoController, inputs, outputs, dt)
+function demo_callback(ctrl::DemoSystem, inputs, outputs, dt)
     ctrl.time += dt
     # params are updated automatically by TcpMonitor → apply_monitor_params!
     return nothing
@@ -99,7 +99,7 @@ cfg = SS.SystemConfig(
 # Run — monitor starts/stops with the runtime (like the logger)
 # ---------------------------------------------------------------------------
 sf = SS.StopSignal()
-ctrl = DemoController()
+ctrl = DemoSystem()
 runtime = SS.SystemRuntime(cfg, sf, ctrl)
 
 @info "Starting TCP monitor example" param_port = 9000 stream_port = 9001

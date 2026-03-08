@@ -21,7 +21,7 @@ include("utils.jl")
 include("loops.jl")
 include("lifecycle.jl")
 
-export AbstractController,
+export AbstractSystem,
        AbstractIO,
        CanIO,
        IO_MODE_READWRITE,
@@ -53,7 +53,7 @@ export AbstractController,
        input_signal_names,
        output_signal_names,
        TcpMonitor,
-       ControllerLifecycle,
+       SystemLifecycle,
        update_lifecycle!,
        start!,
        stop!

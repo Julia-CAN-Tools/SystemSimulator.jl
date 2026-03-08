@@ -37,11 +37,11 @@ cfg = SS.SystemConfig(
     joinpath(@__DIR__, "Logger1.csv"),
 )
 
-struct DummyController <: SS.AbstractController
+struct DummySystem <: SS.AbstractSystem
     params::Dict{String,Float64}
 end
 
-DummyController() = DummyController(Dict{String,Float64}())
+DummySystem() = DummySystem(Dict{String,Float64}())
 
 function ccb(dc, inputs, outputs, dt)
     for (key, value) in inputs
@@ -55,7 +55,7 @@ function ccb(dc, inputs, outputs, dt)
     return nothing
 end
 
-runtime = SS.SystemRuntime(cfg, sf, DummyController())
+runtime = SS.SystemRuntime(cfg, sf, DummySystem())
 
 SS.start!(runtime, ccb)
 

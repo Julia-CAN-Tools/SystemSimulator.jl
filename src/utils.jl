@@ -109,7 +109,7 @@ end
     apply_monitor_params!(runtime)
 
 Apply staged param updates from the TCP monitor into `runtime.params` and
-`controller.params`. Called by control loop before each callback invocation.
+`system.params`. Called by system loop before each callback invocation.
 """
 function apply_monitor_params!(runtime::SystemRuntime)
     mon = runtime.monitor
@@ -120,7 +120,7 @@ function apply_monitor_params!(runtime::SystemRuntime)
                 runtime.params[name] = value
             end
         end
-        ctrl = runtime.controller
+        ctrl = runtime.system
         if hasproperty(ctrl, :params)
             ctrl_params = getproperty(ctrl, :params)
             for (name, value) in mon.param_updates

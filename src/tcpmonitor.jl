@@ -5,8 +5,8 @@ Runtime-level component (parallel to `Logger`) that streams all simulator data
 (inputs, outputs, params, timestamp) to a GUI over raw binary TCP, and receives
 parameter updates from the GUI.
 
-Integrated into the control loop like the Logger:
-- Control loop calls `copy_to_monitor!` then signals `monitorflag` each cycle.
+Integrated into the system loop like the Logger:
+- System loop calls `copy_to_monitor!` then signals `monitorflag` each cycle.
 - Writer task waits on `monitorflag`, reads `monitordict`, sends binary frame.
 - Reader task writes received params into `param_updates`; control loop applies
   them via `apply_monitor_params!` before each callback invocation.
