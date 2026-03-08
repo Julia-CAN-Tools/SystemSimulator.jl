@@ -215,9 +215,11 @@ function start!(runtime::SystemRuntime, control_callback::Function)
     if runtime.monitor !== nothing
         mon = runtime.monitor
         if mon.in_server !== nothing
+            Threads.@spawn _monitor_accept_loop!(mon, :in)
             runtime.monitor_reader_task = Threads.@spawn monitor_reader_loop(mon, runtime.stop_signal)
         end
         if mon.out_server !== nothing
+            Threads.@spawn _monitor_accept_loop!(mon, :out)
             runtime.monitor_writer_task = Threads.@spawn monitor_writer_loop(mon, runtime.stop_signal)
         end
     end

@@ -68,10 +68,6 @@ function TcpMonitor(
         Threads.Atomic{Bool}(false),
     )
 
-    # Start accept loops (background tasks that wait for GUI clients)
-    in_srv !== nothing && Threads.@spawn _monitor_accept_loop!(mon, :in)
-    out_srv !== nothing && Threads.@spawn _monitor_accept_loop!(mon, :out)
-
     return mon
 end
 
