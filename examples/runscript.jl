@@ -1,3 +1,29 @@
+"""
+Example: SystemSimulator CAN echo — vehicle status read + EEC1 write.
+
+Reads all vehicle status signals from `vcan1` (J1939 traffic replayed by `canplayer`)
+and echoes the `EEC1` message back to `vcan2`.  Logs all signals to a CSV file.
+
+## Prerequisites
+
+1. Virtual CAN interfaces configured:
+       bash J1939Parser.jl/logs/setupVirtualCAN.sh
+2. CAN traffic replaying on vcan1 (see `J1939Parser.jl/logs/`):
+       canplayer vcan1=can1 -I <logfile> -l i
+
+## Running
+
+    cd SystemSimulator.jl
+    julia --threads=auto --project=. examples/runscript.jl
+
+## Signal namespacing
+
+- `:can_rx` prefix  →  input keys like `"can_rx.EngineSpeed"`
+- `:can_tx` prefix  →  output keys like `"can_tx.EngineSpeed"`
+
+The callback copies matching signals from `can_rx.*` to `can_tx.*`.
+"""
+
 import SystemSimulator as SS
 import CANInterface as CI
 import J1939Parser as CP

@@ -165,6 +165,12 @@ function system_loop(runtime::SystemRuntime{S,IO,RAW,MON}, system_callback::CF) 
     return nothing
 end
 
+"""
+    logger_loop(stop_signal, logger)
+
+Background task that drains `logger.loggerflag` and calls `writeline` each cycle.
+At shutdown: writes any remaining buffered rows via `writematrix`, then closes the file handle.
+"""
 function logger_loop(stop_signal::StopSignal, logger::Logger)
     @info "Logger loop started" filename = logger.filepath
 
@@ -198,6 +204,37 @@ function logger_loop(stop_signal::StopSignal, logger::Logger)
     return nothing
 end
 
+"""
+    start!(runtime, system_callback)
+
+Spawn all runtime tasks and return immediately (non-blocking).
+
+## Tasks spawned
+
+For each `IOConfig` in `runtime.config.ios`:
+- `reader_task` — blocked on `read_raw`; skipped when mode is `IO_MODE_WRITEONLY`
+- `parser_task` — drains rx queue and calls `decode_raw!`; skipped when mode is `IO_MODE_WRITEONLY`
+- `writer_task` — woken by `outflag`; skipped when mode is `IO_MODE_READONLY`
+
+Global tasks (always):
+- `system_task` — deterministic control loop at `config.dt_ms` cadence
+- `logger_task` — write-behind CSV logger
+
+Optional monitor tasks (when `config.monitor !== nothing`):
+- `monitor_reader_task` — receives param updates from GUI (when `in_port > 0`)
+- `monitor_writer_task` — streams all signals to GUI (when `out_port > 0`)
+
+## Requirements
+
+Must be run with `--threads=auto` (or `--threads=N` with N ≥ 2); `Threads.@spawn` is used
+for all tasks.
+
+## Callback signature
+
+```julia
+system_callback(system, inputs::Dict{String,Float64}, outputs::Dict{String,Float64}, dt::Float64)
+```
+"""
 function start!(runtime::SystemRuntime{S,IO,RAW,MON}, system_callback::CF) where {S, IO<:AbstractIO, RAW, MON, CF<:Function}
     for state in runtime.io_states
         if is_read_enabled(state.config)
@@ -226,6 +263,25 @@ function start!(runtime::SystemRuntime{S,IO,RAW,MON}, system_callback::CF) where
     return nothing
 end
 
+"""
+    stop!(runtime)
+
+Coordinated shutdown sequence. Always call `request_stop!(runtime.stop_signal)` before
+`stop!` (or use the convenience wrapper that does both).
+
+## Shutdown sequence
+
+1. Sets the stop flag via `request_stop!`
+2. Closes all IO backends so blocking `read_raw` calls return immediately
+3. Sends a wakeup value to each writer's `outflag` channel
+4. Sends a wakeup value to `logger.loggerflag`
+5. Closes monitor TCP server sockets and wakes `monitorflag`
+6. Sleeps 200 ms to let in-flight work drain
+7. Closes all channels (`rx_queue`, `outflag`, `loggerflag`, `monitorflag`)
+
+`stop!` does **not** `wait` on any task handles. If you need to block until the system loop
+has finished, call `wait(runtime.system_task)` after `stop!`.
+"""
 function stop!(runtime::SystemRuntime)
     request_stop!(runtime.stop_signal)
 

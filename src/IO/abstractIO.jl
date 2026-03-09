@@ -9,6 +9,24 @@ Concrete IO types must:
 5. Implement `write_raw`.
 6. Implement `input_signal_names` and `output_signal_names`.
 7. Optionally implement `Base.close` when resources must be released.
+
+Optionally override `raw_payload_type(::Type{MyIO})` to return a concrete type; this
+specializes the `IOState` rx queue channel and eliminates boxing overhead.
+
+## Minimal MockIO example
+
+```julia
+struct MockIO <: AbstractIO end
+SS.raw_payload_type(::Type{MockIO}) = Vector{UInt8}
+SS.read_raw(io::MockIO) = UInt8[0x01, 0x02]
+SS.decode_raw!(::MockIO, raw, d::Dict{String,Float64}) = (d["Speed"] = Float64(raw[1]); true)
+SS.encode_raw(::MockIO, d::AbstractDict{String,<:Real}) = [collect(UInt8, values(d))]
+SS.write_raw(::MockIO, payload) = nothing
+SS.input_signal_names(::MockIO) = ["Speed"]
+SS.output_signal_names(::MockIO) = ["Torque"]
+```
+
+See `test/runtests.jl` for the full `MockIO` pattern used in the test suite.
 """
 abstract type AbstractIO end
 
@@ -83,7 +101,12 @@ end
 """
     global_key(io_name::Symbol, local_name::String) -> String
 
-Namespace helper for global runtime dictionaries.
+Namespace helper for global runtime dictionaries. Concatenates the IO name and signal name
+with a `.` separator.
+
+```julia
+global_key(:can_rx, "EngineSpeed") == "can_rx.EngineSpeed"
+```
 """
 global_key(io_name::Symbol, local_name::String) = string(io_name, ".", local_name)
 
