@@ -159,6 +159,12 @@ struct TestSystem <: SS.AbstractSystem
 end
 TestSystem() = TestSystem(Dict{String,Float64}("gain" => 2.0))
 
+mutable struct DirtySystem <: SS.AbstractSystem
+    params::Dict{String,Float64}
+    _params_dirty::Bool
+end
+DirtySystem() = DirtySystem(Dict{String,Float64}("gain" => 2.0), false)
+
 struct BareSystem end
 
 # -----------------------------------------------------------------------------
@@ -539,11 +545,15 @@ struct BareSystem end
         logfile = tempname() * ".csv"
         mcfg = SS.MonitorConfig("127.0.0.1", 19201, 0)
         cfg = SS.SystemConfig(20, [SS.IOConfig(:io, io, 32, SS.IO_MODE_READONLY)], logfile, mcfg)
-        ctrl = TestSystem()  # has params["gain"] = 2.0
+        ctrl = DirtySystem()  # has params["gain"] = 2.0
         runtime = SS.SystemRuntime(cfg, SS.StopSignal(), ctrl)
 
         SS.start!(runtime, (c, i, o, d) -> nothing)
         sleep(0.2)
+
+        @test runtime.params["gain"] ≈ 2.0 atol = 1e-6
+        @test ctrl.params["gain"] ≈ 2.0 atol = 1e-6
+        @test ctrl._params_dirty == false
 
         # Connect to input port
         sock = Sockets.connect("127.0.0.1", 19201)
@@ -566,6 +576,7 @@ struct BareSystem end
 
         # Verify controller.params updated
         @test ctrl.params["gain"] ≈ 5.0 atol = 1e-6
+        @test ctrl._params_dirty == true
 
         close(sock)
         SS.stop!(runtime)

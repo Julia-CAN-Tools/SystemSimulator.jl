@@ -116,6 +116,9 @@ function apply_monitor_params!(runtime::SystemRuntime)
 
     lock(mon.param_lock)
     try
+        seq = mon.param_seq[]
+        seq == runtime._last_param_seq && return nothing
+
         lock(runtime.paramlock)
         try
             for (name, value) in mon.param_updates
@@ -139,6 +142,7 @@ function apply_monitor_params!(runtime::SystemRuntime)
                 ctrl._params_dirty = true
             end
         end
+        runtime._last_param_seq = seq
     finally
         unlock(mon.param_lock)
     end

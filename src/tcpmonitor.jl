@@ -34,6 +34,7 @@ mutable struct TcpMonitor
     param_names::Vector{String}
     param_updates::Dict{String,Float64}
     param_lock::ReentrantLock
+    param_seq::Threads.Atomic{UInt64}
 
     # Output side (data streamer — mirrors Logger pattern)
     out_server::Union{Sockets.TCPServer,Nothing}
@@ -71,6 +72,7 @@ function TcpMonitor(
 
     mon = TcpMonitor(
         in_srv, nothing, ReentrantLock(), param_names, param_updates, ReentrantLock(),
+        Threads.Atomic{UInt64}(0),
         out_srv, nothing, ReentrantLock(), out_names, monitordict, ReentrantLock(),
         Base.Event(),
         Vector{UInt8}(undef, nbytes_in),
@@ -192,6 +194,7 @@ function monitor_reader_loop(mon::TcpMonitor, stop_signal::StopSignal)
                 for (i, name) in enumerate(mon.param_names)
                     mon.param_updates[name] = ltoh(values[i])
                 end
+                mon.param_seq[] = mon.param_seq[] + UInt64(1)
             finally
                 unlock(mon.param_lock)
             end

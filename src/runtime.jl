@@ -150,6 +150,7 @@ mutable struct SystemRuntime{S, IO<:AbstractIO, RAW, MON}
     _monitor_output_pairs::Vector{IndexPair}
     _monitor_param_pairs::Vector{IndexPair}
     _monitor_time_idx::Int
+    _last_param_seq::UInt64
 end
 
 function _as_float64_dict(values)::Dict{String,Float64}
@@ -293,6 +294,7 @@ function SystemRuntime(
         monitor_output_pairs,
         monitor_param_pairs,
         monitor_time_idx,
+        UInt64(0),
     )
 end
 
