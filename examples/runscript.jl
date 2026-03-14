@@ -63,27 +63,29 @@ cfg = SS.SystemConfig(
     joinpath(@__DIR__, "Logger1.csv"),
 )
 
-struct DummySystem <: SS.AbstractSystem
-    params::Dict{String,Float64}
+mutable struct DummySystem <: SS.AbstractSystem
+    input_slots::Vector{Int}
+    output_slots::Vector{Int}
 end
 
-DummySystem() = DummySystem(Dict{String,Float64}())
+DummySystem() = DummySystem(Int[], Int[])
 
-function ccb(dc, inputs, outputs, dt)
-    for (key, value) in inputs
-        startswith(key, "can_rx.") || continue
-        local_key = split(key, "."; limit=2)[2]
-        out_key = string("can_tx.", local_key)
-        if haskey(outputs, out_key)
-            outputs[out_key] = value
-        end
+function SS.bind!(dc::DummySystem, runtime)
+    dc.input_slots = [SS.signal_slot(runtime.inputs, "can_rx.$name") for name in SS.signal_names(runtime.io_states[1].input_snapshot)]
+    dc.output_slots = [SS.signal_slot(runtime.outputs, "can_tx.$name") for name in SS.signal_names(runtime.io_states[2].output_shared)]
+    return nothing
+end
+
+function SS.control_step!(dc::DummySystem, inputs, outputs, _params, _dt)
+    @inbounds for i in eachindex(dc.output_slots)
+        outputs[dc.output_slots[i]] = inputs[dc.input_slots[i]]
     end
     return nothing
 end
 
 runtime = SS.SystemRuntime(cfg, sf, DummySystem())
 
-SS.start!(runtime, ccb)
+SS.start!(runtime)
 
 RUN_SECONDS = 10.0
 @info "Running SystemSimulator example" run_seconds = RUN_SECONDS

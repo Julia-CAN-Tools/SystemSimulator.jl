@@ -1,51 +1,20 @@
-"""
-    TcpMonitor
-
-Runtime-level component (parallel to `Logger`) that streams all simulator data
-(inputs, outputs, params, timestamp) to a GUI over raw binary TCP, and receives
-parameter updates from the GUI.
-
-Integrated into the system loop like the Logger:
-- System loop calls `snapshot_to_sinks!` then signals `monitorflag` each cycle.
-- Writer task waits on `monitorflag`, reads `monitordict`, sends binary frame.
-- Reader task writes received params into `param_updates`; control loop applies
-  them via `apply_monitor_params!` before each callback invocation.
-
-## Wire Protocol
-
-**Handshake** (server → client, once on connect):
-```
-[4 bytes] num_signals  : UInt32 LE
-Per signal:
-  [2 bytes] name_len   : UInt16 LE
-  [N bytes] name       : UTF-8
-```
-
-**Data frame** (repeated, fixed-size):
-```
-[num_signals × 8 bytes] : Float64 values in declared order, LE
-```
-"""
 mutable struct TcpMonitor
-    # Input side (param receiver)
     in_server::Union{Sockets.TCPServer,Nothing}
     in_client::Union{Sockets.TCPSocket,Nothing}
     in_lock::ReentrantLock
     param_names::Vector{String}
-    param_updates::Dict{String,Float64}
+    param_values::Vector{Float64}
     param_lock::ReentrantLock
     param_seq::Threads.Atomic{UInt64}
 
-    # Output side (data streamer — mirrors Logger pattern)
     out_server::Union{Sockets.TCPServer,Nothing}
     out_client::Union{Sockets.TCPSocket,Nothing}
     out_lock::ReentrantLock
     out_names::Vector{String}
-    monitordict::SignalBuffer
-    monitorlock::ReentrantLock
+    snapshot::Vector{Float64}
+    snapshot_seq::Threads.Atomic{UInt64}
     monitorflag::Base.Event
 
-    # Pre-allocated buffers
     _read_buf::Vector{UInt8}
     _write_buf::Vector{Float64}
     _write_bytes::Vector{UInt8}
@@ -64,36 +33,21 @@ function TcpMonitor(
     in_srv = in_port > 0 ? Sockets.listen(Sockets.getaddrinfo(h), UInt16(in_port)) : nothing
     out_srv = out_port > 0 ? Sockets.listen(Sockets.getaddrinfo(h), UInt16(out_port)) : nothing
 
-    param_updates = Dict{String,Float64}(name => 0.0 for name in param_names)
-    monitordict = SignalBuffer(copy(out_names))
-
     n_out = length(out_names)
     nbytes_in = length(param_names) * sizeof(Float64)
 
-    mon = TcpMonitor(
-        in_srv, nothing, ReentrantLock(), param_names, param_updates, ReentrantLock(),
-        Threads.Atomic{UInt64}(0),
-        out_srv, nothing, ReentrantLock(), out_names, monitordict, ReentrantLock(),
-        Base.Event(),
+    return TcpMonitor(
+        in_srv, nothing, ReentrantLock(), copy(param_names), zeros(Float64, length(param_names)),
+        ReentrantLock(), Threads.Atomic{UInt64}(0),
+        out_srv, nothing, ReentrantLock(), copy(out_names), zeros(Float64, n_out),
+        Threads.Atomic{UInt64}(0), Base.Event(),
         Vector{UInt8}(undef, nbytes_in),
         Vector{Float64}(undef, n_out),
         Vector{UInt8}(undef, n_out * sizeof(Float64)),
         Threads.Atomic{Bool}(false),
     )
-
-    return mon
 end
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-"""
-    _send_header(sock, names)
-
-Send the TcpMonitor handshake header to a newly connected client.
-Protocol: UInt32 LE count, then for each name: UInt16 LE length + UTF-8 bytes.
-"""
 function _send_header(sock::Sockets.TCPSocket, names::Vector{String})
     write(sock, htol(UInt32(length(names))))
     for name in names
@@ -122,7 +76,10 @@ function _monitor_accept_loop!(mon::TcpMonitor, side::Symbol)
         try
             _send_header(new_sock, names)
         catch
-            try; close(new_sock); catch; end
+            try
+                close(new_sock)
+            catch
+            end
             continue
         end
 
@@ -135,7 +92,10 @@ function _monitor_accept_loop!(mon::TcpMonitor, side::Symbol)
                 mon.out_client = new_sock
             end
             if old !== nothing
-                try; close(old); catch; end
+                try
+                    close(old)
+                catch
+                end
             end
         finally
             unlock(lck)
@@ -150,7 +110,10 @@ function _monitor_disconnect!(mon::TcpMonitor, side::Symbol)
     try
         client = side === :in ? mon.in_client : mon.out_client
         if client !== nothing
-            try; close(client); catch; end
+            try
+                close(client)
+            catch
+            end
             if side === :in
                 mon.in_client = nothing
             else
@@ -162,10 +125,6 @@ function _monitor_disconnect!(mon::TcpMonitor, side::Symbol)
     end
     return nothing
 end
-
-# ---------------------------------------------------------------------------
-# Reader loop — receives param updates from GUI, stages into param_updates
-# ---------------------------------------------------------------------------
 
 function monitor_reader_loop(mon::TcpMonitor, stop_signal::StopSignal)
     nbytes = length(mon.param_names) * sizeof(Float64)
@@ -191,8 +150,8 @@ function monitor_reader_loop(mon::TcpMonitor, stop_signal::StopSignal)
 
             lock(mon.param_lock)
             try
-                for (i, name) in enumerate(mon.param_names)
-                    mon.param_updates[name] = ltoh(values[i])
+                @inbounds for i in eachindex(mon.param_values)
+                    mon.param_values[i] = ltoh(values[i])
                 end
                 mon.param_seq[] = mon.param_seq[] + UInt64(1)
             finally
@@ -207,15 +166,9 @@ function monitor_reader_loop(mon::TcpMonitor, stop_signal::StopSignal)
     return nothing
 end
 
-# ---------------------------------------------------------------------------
-# Writer loop — waits on monitorflag, sends snapshot (mirrors logger_loop)
-# Uses copyto! from SignalBuffer.values for zero-hash bulk copy.
-# ---------------------------------------------------------------------------
-
 function monitor_writer_loop(mon::TcpMonitor, stop_signal::StopSignal)
-    n = length(mon.out_names)
-    nbytes = n * sizeof(Float64)
-    @info "Monitor writer started" signals = n
+    nbytes = length(mon.out_names) * sizeof(Float64)
+    @info "Monitor writer started" signals = length(mon.out_names)
 
     while !stop_requested(stop_signal)
         wait(mon.monitorflag)
@@ -227,14 +180,14 @@ function monitor_writer_loop(mon::TcpMonitor, stop_signal::StopSignal)
         end
         sock === nothing && continue
 
-        lock(mon.monitorlock)
-        try
-            copyto!(mon._write_buf, mon.monitordict.values)
-        finally
-            unlock(mon.monitorlock)
+        while true
+            seq1 = mon.snapshot_seq[]
+            isodd(seq1) && continue
+            copyto!(mon._write_buf, mon.snapshot)
+            seq2 = mon.snapshot_seq[]
+            seq1 == seq2 && break
         end
 
-        # htol is identity on little-endian (x86/ARM), so reinterpret directly
         unsafe_copyto!(pointer(mon._write_bytes), Ptr{UInt8}(pointer(mon._write_buf)), nbytes)
         try
             unsafe_write(sock, pointer(mon._write_bytes), nbytes)
@@ -248,19 +201,21 @@ function monitor_writer_loop(mon::TcpMonitor, stop_signal::StopSignal)
     return nothing
 end
 
-# ---------------------------------------------------------------------------
-# Close — release TCP resources (called by stop!)
-# ---------------------------------------------------------------------------
-
 function close_monitor!(mon::TcpMonitor)
     Threads.atomic_xchg!(mon.closed, true)
     _monitor_disconnect!(mon, :in)
     _monitor_disconnect!(mon, :out)
     if mon.in_server !== nothing
-        try; close(mon.in_server); catch; end
+        try
+            close(mon.in_server)
+        catch
+        end
     end
     if mon.out_server !== nothing
-        try; close(mon.out_server); catch; end
+        try
+            close(mon.out_server)
+        catch
+        end
     end
     return nothing
 end

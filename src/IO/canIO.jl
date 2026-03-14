@@ -3,9 +3,6 @@
 
 CAN adapter that reuses `CANInterface` for transport and `CANUtils` message
 catalog encode/decode functions.
-
-Builds a hash index (`_rx_index`) at construction for O(1) message lookup
-in `decode_raw!` instead of linear scan.
 """
 struct CanIO{D<:CI.AbstractCanDriver,R<:CU.AbstractCanMessage,T<:CU.AbstractCanMessage} <: AbstractIO
     driver::D
@@ -35,8 +32,6 @@ end
 raw_payload_type(::Type{<:CanIO}) = CI.CanFrameRaw
 
 function read_raw(io::CanIO{<:CI.SocketCanDriver})::Union{CI.CanFrameRaw,Nothing}
-    # Poll with a bounded timeout so reader loops can observe stop requests
-    # even when no CAN traffic is present.
     return CI.read(io.driver; timeout_ms=10)
 end
 
@@ -73,17 +68,24 @@ function encode_and_write!(io::CanIO, local_outputs::AbstractDict{String,<:Real}
     return nothing
 end
 
-function input_signal_names(io::CanIO)::Vector{String}
-    isempty(io.rx_catalog) && return String[]
-    signal_dict = CU.create_signal_dict(io.rx_catalog)
-    return collect(keys(signal_dict))
+function _collect_signal_names(catalog)::Vector{String}
+    names = String[]
+    seen = Set{String}()
+    for message in catalog
+        if hasproperty(message, :signals)
+            for sig in getproperty(message, :signals)
+                sig_name = getproperty(sig, :name)
+                sig_name in seen && continue
+                push!(names, sig_name)
+                push!(seen, sig_name)
+            end
+        end
+    end
+    return names
 end
 
-function output_signal_names(io::CanIO)::Vector{String}
-    isempty(io.tx_catalog) && return String[]
-    signal_dict = CU.create_signal_dict(io.tx_catalog)
-    return collect(keys(signal_dict))
-end
+input_signal_names(io::CanIO)::Vector{String} = _collect_signal_names(io.rx_catalog)
+output_signal_names(io::CanIO)::Vector{String} = _collect_signal_names(io.tx_catalog)
 
 function Base.close(io::CanIO)::Nothing
     CI.close(io.driver)

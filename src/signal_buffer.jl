@@ -1,66 +1,108 @@
 """
-    SignalBuffer <: AbstractDict{String,Float64}
+    SignalSchema
 
-Dense signal storage backed by a `Vector{Float64}` with string-to-index mapping.
-Implements the full `AbstractDict` interface for backward compatibility with code
-that uses `inputs["key"]` / `outputs["key"] = val`.
-
-Pre-computed index pairs enable O(1) array-indexed copies in hot paths
-(gather_inputs!, split_outputs!, copy_to_logger!, writeline, monitor_writer_loop)
-instead of per-cycle hash lookups.
+Ordered signal layout used by the runtime. Names are resolved to integer slots once during
+setup; steady-state code should use the integer slots directly.
 """
-mutable struct SignalBuffer <: AbstractDict{String,Float64}
-    const names::Vector{String}
-    values::Vector{Float64}
-    const _index::Dict{String,Int}
+struct SignalSchema
+    names::Vector{String}
+    index::Dict{String,Int}
 end
 
-function SignalBuffer(names::Vector{String})
-    idx = Dict{String,Int}(name => i for (i, name) in enumerate(names))
-    return SignalBuffer(copy(names), zeros(Float64, length(names)), idx)
-end
-
-function SignalBuffer(d::Dict{String,Float64}, ordered_names::Vector{String})
-    sb = SignalBuffer(ordered_names)
-    for (name, val) in d
-        if haskey(sb._index, name)
-            sb.values[sb._index[name]] = val
-        end
+function SignalSchema(names::Vector{String})
+    ordered = String[]
+    seen = Set{String}()
+    for name in names
+        name in seen && continue
+        push!(ordered, name)
+        push!(seen, name)
     end
-    return sb
+    return SignalSchema(ordered, Dict(name => i for (i, name) in enumerate(ordered)))
 end
-
-# AbstractDict interface
-Base.getindex(sb::SignalBuffer, key::AbstractString) = sb.values[sb._index[key]]
-function Base.setindex!(sb::SignalBuffer, val, key::AbstractString)
-    sb.values[sb._index[key]] = Float64(val)
-    return val
-end
-function Base.get(sb::SignalBuffer, key::AbstractString, default)
-    idx = get(sb._index, key, 0)
-    return idx == 0 ? Float64(default) : sb.values[idx]
-end
-Base.haskey(sb::SignalBuffer, key::AbstractString) = haskey(sb._index, key)
-Base.length(sb::SignalBuffer) = length(sb.names)
-Base.keys(sb::SignalBuffer) = sb.names
-Base.values(sb::SignalBuffer) = sb.values
-
-function Base.iterate(sb::SignalBuffer)
-    isempty(sb.names) && return nothing
-    return (sb.names[1] => sb.values[1], 2)
-end
-
-function Base.iterate(sb::SignalBuffer, i::Int)
-    i > length(sb.names) && return nothing
-    return (sb.names[i] => sb.values[i], i + 1)
-end
-
-Base.copy(sb::SignalBuffer) = SignalBuffer(copy(sb.names), copy(sb.values), copy(sb._index))
 
 """
-    sync_values!(dest::SignalBuffer, src::SignalBuffer)
+    SignalBuffer
 
-Fast bulk copy for matching SignalBuffers (same names, same order).
+Dense runtime signal storage. The runtime owns and moves raw `Vector{Float64}` payloads;
+name-based lookup exists only for setup and non-hot-path helpers.
+"""
+mutable struct SignalBuffer
+    schema::SignalSchema
+    values::Vector{Float64}
+end
+
+SignalBuffer(schema::SignalSchema) = SignalBuffer(schema, zeros(Float64, length(schema.names)))
+SignalBuffer(names::Vector{String}) = SignalBuffer(SignalSchema(names))
+
+"""
+    NamedSignalView <: AbstractDict{String,Float64}
+
+Dictionary adapter over a `SignalBuffer`. Used only at API boundaries where slower
+name-based access is still convenient (custom IO implementations, tests, debugging).
+The core runtime uses integer slots on `SignalBuffer` directly.
+"""
+struct NamedSignalView <: AbstractDict{String,Float64}
+    buffer::SignalBuffer
+end
+
+SignalSchema(buffer::SignalBuffer) = buffer.schema
+signal_names(schema::SignalSchema) = schema.names
+signal_names(buffer::SignalBuffer) = buffer.schema.names
+signal_slot(schema::SignalSchema, name::AbstractString) = schema.index[String(name)]
+signal_slot(buffer::SignalBuffer, name::AbstractString) = signal_slot(buffer.schema, name)
+
+function try_signal_slot(schema::SignalSchema, name::AbstractString)
+    return get(schema.index, String(name), 0)
+end
+
+try_signal_slot(buffer::SignalBuffer, name::AbstractString) = try_signal_slot(buffer.schema, name)
+
+Base.length(buffer::SignalBuffer) = length(buffer.values)
+Base.getindex(buffer::SignalBuffer, slot::Int) = (@inbounds buffer.values[slot])
+function Base.setindex!(buffer::SignalBuffer, value, slot::Int)
+    @inbounds buffer.values[slot] = Float64(value)
+    return value
+end
+Base.getindex(buffer::SignalBuffer, name::AbstractString) = buffer.values[signal_slot(buffer, name)]
+function Base.setindex!(buffer::SignalBuffer, value, name::AbstractString)
+    buffer.values[signal_slot(buffer, name)] = Float64(value)
+    return value
+end
+
+function Base.get(buffer::SignalBuffer, name::AbstractString, default)
+    idx = try_signal_slot(buffer, name)
+    return idx == 0 ? Float64(default) : buffer.values[idx]
+end
+
+function Base.fill!(buffer::SignalBuffer, value)
+    fill!(buffer.values, Float64(value))
+    return buffer
+end
+
+Base.copy(buffer::SignalBuffer) = SignalBuffer(buffer.schema, copy(buffer.values))
+
+# NamedSignalView dictionary interface
+Base.length(view::NamedSignalView) = length(view.buffer)
+Base.keys(view::NamedSignalView) = signal_names(view.buffer)
+Base.values(view::NamedSignalView) = view.buffer.values
+Base.haskey(view::NamedSignalView, key::AbstractString) = try_signal_slot(view.buffer, key) > 0
+Base.getindex(view::NamedSignalView, key::AbstractString) = view.buffer[key]
+Base.setindex!(view::NamedSignalView, value, key::AbstractString) = (view.buffer[key] = value)
+
+function Base.get(view::NamedSignalView, key::AbstractString, default)
+    return get(view.buffer, key, default)
+end
+
+function Base.iterate(view::NamedSignalView, i::Int=1)
+    i > length(view.buffer) && return nothing
+    names = signal_names(view.buffer)
+    return (names[i] => view.buffer.values[i], i + 1)
+end
+
+"""
+    sync_values!(dest, src)
+
+Fast bulk copy for matching `SignalBuffer`s.
 """
 function sync_values!(dest::SignalBuffer, src::SignalBuffer)
     copyto!(dest.values, src.values)
@@ -70,39 +112,29 @@ end
 """
     IndexPair
 
-Pre-computed source→destination index mapping for zero-hash signal copies.
+Pre-computed source-to-destination slot mapping.
 """
 struct IndexPair
     src::Int
     dst::Int
 end
 
-"""
-    compute_index_pairs(src_names, src_index, dst_names, dst_index)
-
-Build a vector of IndexPairs mapping matching signal names between two SignalBuffers.
-"""
 function compute_index_pairs(
-    src_index::Dict{String,Int},
-    dst_index::Dict{String,Int},
+    src_schema::SignalSchema,
+    dst_schema::SignalSchema,
     names::Vector{String},
 )::Vector{IndexPair}
     pairs = IndexPair[]
     for name in names
-        si = get(src_index, name, 0)
-        di = get(dst_index, name, 0)
+        si = get(src_schema.index, name, 0)
+        di = get(dst_schema.index, name, 0)
         si > 0 && di > 0 && push!(pairs, IndexPair(si, di))
     end
     return pairs
 end
 
-"""
-    copy_by_pairs!(dst_values, src_values, pairs)
-
-Copy values using pre-computed index pairs. Zero allocations.
-"""
 @inline function copy_by_pairs!(
-    dst_values::Vector{Float64},
+    dst_values::AbstractVector{Float64},
     src_values::Vector{Float64},
     pairs::Vector{IndexPair},
 )
@@ -110,42 +142,4 @@ Copy values using pre-computed index pairs. Zero allocations.
         dst_values[p.dst] = src_values[p.src]
     end
     return nothing
-end
-
-"""
-    compute_gather_pairs(local_snapshot, local_keymap, global_inputs)
-
-Build index pairs for gather_inputs!: local_snapshot[local_idx] → global_inputs[global_idx].
-"""
-function compute_gather_pairs(
-    snapshot::SignalBuffer,
-    keymap::Dict{String,String},
-    inputs::SignalBuffer,
-)::Vector{IndexPair}
-    pairs = IndexPair[]
-    for (local_name, global_name) in keymap
-        li = get(snapshot._index, local_name, 0)
-        gi = get(inputs._index, global_name, 0)
-        li > 0 && gi > 0 && push!(pairs, IndexPair(li, gi))
-    end
-    return pairs
-end
-
-"""
-    compute_split_pairs(global_outputs, local_keymap, local_output)
-
-Build index pairs for split_outputs!: global_outputs[global_idx] → local_output[local_idx].
-"""
-function compute_split_pairs(
-    outputs::SignalBuffer,
-    keymap::Dict{String,String},
-    local_output::SignalBuffer,
-)::Vector{IndexPair}
-    pairs = IndexPair[]
-    for (local_name, global_name) in keymap
-        gi = get(outputs._index, global_name, 0)
-        li = get(local_output._index, local_name, 0)
-        gi > 0 && li > 0 && push!(pairs, IndexPair(gi, li))
-    end
-    return pairs
 end

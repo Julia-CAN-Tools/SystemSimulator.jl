@@ -56,7 +56,7 @@ mutable struct VirtualIO <: SS.AbstractIO
 end
 VirtualIO() = VirtualIO(false)
 SS.read_raw(io::VirtualIO) = (io.closed ? nothing : (sleep(0.01); nothing))
-SS.decode_raw!(::VirtualIO, _, ::Dict{String,Float64})::Bool = false
+SS.decode_raw!(::VirtualIO, _, ::AbstractDict{String,Float64})::Bool = false
 SS.encode_raw(::VirtualIO, ::AbstractDict{String,<:Real})::Vector{Any} = Any[]
 SS.write_raw(::VirtualIO, _)::Nothing = nothing
 SS.input_signal_names(::VirtualIO)::Vector{String} = String[]
@@ -67,21 +67,29 @@ Base.close(io::VirtualIO)::Nothing = (io.closed = true; nothing)
 # System — params are tunable from GUI via TcpMonitor
 # ---------------------------------------------------------------------------
 mutable struct DemoSystem <: SS.AbstractSystem
-    params::Dict{String,Float64}
+    param_names::Vector{String}
+    initial_values::Dict{String,Float64}
     time::Float64
 end
 
 DemoSystem() = DemoSystem(
+    ["Kp", "setpoint"],
     Dict{String,Float64}("Kp" => 1.0, "setpoint" => 0.0),
     0.0,
 )
 
-# ---------------------------------------------------------------------------
-# System callback
-# ---------------------------------------------------------------------------
-function demo_callback(ctrl::DemoSystem, inputs, outputs, dt)
+SS.parameter_names(ctrl::DemoSystem) = copy(ctrl.param_names)
+SS.monitor_parameter_names(ctrl::DemoSystem) = copy(ctrl.param_names)
+
+function SS.initialize_parameters!(ctrl::DemoSystem, params)
+    for name in ctrl.param_names
+        params[name] = ctrl.initial_values[name]
+    end
+    return nothing
+end
+
+function SS.control_step!(ctrl::DemoSystem, _inputs, _outputs, _params, dt)
     ctrl.time += dt
-    # params are updated automatically by TcpMonitor → apply_monitor_params!
     return nothing
 end
 
@@ -103,10 +111,10 @@ ctrl = DemoSystem()
 runtime = SS.SystemRuntime(cfg, sf, ctrl)
 
 @info "Starting TCP monitor example" param_port = 9000 stream_port = 9001
-@info "Params the GUI can tune:" keys = sort(collect(keys(runtime.params)))
+@info "Params the GUI can tune:" keys = SS.signal_names(runtime.params)
 @info "Signals streamed to GUI:" keys = runtime.monitor.out_names
 
-SS.start!(runtime, demo_callback)
+SS.start!(runtime)
 
 RUN_SECONDS = 60.0
 @info "Running for $(RUN_SECONDS)s — press Ctrl+C to stop early"
