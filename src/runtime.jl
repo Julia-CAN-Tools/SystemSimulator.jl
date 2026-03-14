@@ -15,8 +15,8 @@ Two fields are recognised by convention (both optional):
 
 ```julia
 function my_callback(sys::MySystem,
-                     inputs::Dict{String,Float64},
-                     outputs::Dict{String,Float64},
+                     inputs::AbstractDict{String,Float64},
+                     outputs::AbstractDict{String,Float64},
                      dt::Float64)
     # inputs:  global-keyed signals from all read-enabled IOs, e.g. "can_rx.EngineSpeed"
     # outputs: global-keyed signals for all write-enabled IOs, e.g. "can_tx.DesiredTorque"
@@ -42,38 +42,28 @@ abstract type AbstractSystem end
 Per-IO runtime state managed by `SystemRuntime`. Constructed automatically — users do
 not build `IOState` directly.
 
-## Fields
-
-| Field                  | Type                    | Description |
-|------------------------|-------------------------|-------------|
-| `config`               | `IOConfig{IO}`          | Source configuration (name, io instance, mode) |
-| `rx_queue`             | `Channel{RAW}`          | Raw payload channel between reader and parser tasks |
-| `input_local_rx`       | `Dict{String,Float64}`  | Latest decoded values (local signal names) |
-| `input_local_snapshot` | `Dict{String,Float64}`  | Locked copy read by the system loop |
-| `output_local`         | `Dict{String,Float64}`  | Output values (local names) written by the system loop |
-| `input_keymap`         | `Dict{String,String}`   | Maps local input name → global key (`"<name>.<signal>"`) |
-| `output_keymap`        | `Dict{String,String}`   | Maps local output name → global key |
-| `inputlock`            | `ReentrantLock`         | Guards `input_local_snapshot` |
-| `outlock`              | `ReentrantLock`         | Guards `output_local` during encode |
-| `outflag`              | `Channel{Bool}`         | Capacity-1 channel; system loop sends `true` to wake writer |
-| `reader_task`          | `Task`                  | Blocking `read_raw` loop |
-| `parser_task`          | `Task`                  | `decode_raw!` consumer loop |
-| `writer_task`          | `Task`                  | `encode_raw` / `write_raw` loop |
+## Optimizations
+- `input_local_snapshot::SignalBuffer` — dense vector-backed signal storage (3.1)
+- `output_local::SignalBuffer` — dense vector-backed signal storage (3.1)
+- `_gather_pairs` / `_split_pairs` — pre-computed index mappings for zero-hash copies (3.1)
+- `_snap_seq::Atomic{UInt64}` — SeqLock for lock-free snapshot reads (3.2)
 """
 mutable struct IOState{IO<:AbstractIO, RAW}
     config::IOConfig{IO}
     rx_queue::Channel{RAW}
     input_local_rx::Dict{String,Float64}
-    input_local_snapshot::Dict{String,Float64}
-    output_local::Dict{String,Float64}
+    input_local_snapshot::SignalBuffer
+    output_local::SignalBuffer
     input_keymap::Dict{String,String}
     output_keymap::Dict{String,String}
-    inputlock::ReentrantLock
-    outlock::ReentrantLock
-    outflag::Channel{Bool}
+    outlock::Base.Threads.SpinLock
+    outflag::Base.Event
     reader_task::Task
     parser_task::Task
     writer_task::Task
+    _gather_pairs::Vector{IndexPair}
+    _split_pairs::Vector{IndexPair}
+    _snap_seq::Threads.Atomic{UInt64}
 
     function IOState(config::IOConfig{IO}) where {IO<:AbstractIO}
         RAW = raw_payload_type(IO)
@@ -81,8 +71,8 @@ mutable struct IOState{IO<:AbstractIO, RAW}
         output_names = is_write_enabled(config) ? unique(output_signal_names(config.io)) : String[]
 
         input_local_rx = Dict{String,Float64}(name => 0.0 for name in input_names)
-        input_local_snapshot = copy(input_local_rx)
-        output_local = Dict{String,Float64}(name => 0.0 for name in output_names)
+        input_local_snapshot = SignalBuffer(sort(copy(input_names)))
+        output_local = SignalBuffer(sort(copy(output_names)))
 
         input_keymap = build_keymap(config.name, input_names)
         output_keymap = build_keymap(config.name, output_names)
@@ -95,12 +85,14 @@ mutable struct IOState{IO<:AbstractIO, RAW}
             output_local,
             input_keymap,
             output_keymap,
-            ReentrantLock(),
-            ReentrantLock(),
-            Channel{Bool}(1),
+            Base.Threads.SpinLock(),
+            Base.Event(),
             Task(() -> nothing),
             Task(() -> nothing),
             Task(() -> nothing),
+            IndexPair[],
+            IndexPair[],
+            Threads.Atomic{UInt64}(0),
         )
     end
 end
@@ -119,34 +111,9 @@ Aggregate runtime bundle. Constructed via `SystemRuntime(config, stop_signal, sy
 | `RAW`     |                    | Raw payload type (`raw_payload_type(IO)`); specializes `rx_queue` |
 | `MON`     | `TcpMonitor` or `Nothing` | Concrete monitor type; `Nothing` when monitoring is disabled |
 
-`SystemRuntime{S,IO,RAW,Nothing}` and `SystemRuntime{S,IO,RAW,TcpMonitor}` are distinct
-concrete types, so all monitor-related dispatch is resolved at compile time.
-
-## Fields
-
-| Field                 | Type                    | Description |
-|-----------------------|-------------------------|-------------|
-| `config`              | `SystemConfig{IO}`      | Top-level configuration |
-| `io_states`           | `Vector{IOState{IO,RAW}}` | Per-IO state (one entry per `IOConfig`) |
-| `stop_signal`         | `StopSignal`            | Thread-safe shutdown flag |
-| `system`              | `S`                     | User-defined system struct |
-| `logger`              | `Logger`                | Write-behind CSV logger |
-| `monitor`             | `MON`                   | `TcpMonitor` or `nothing` |
-| `params`              | `Dict{String,Float64}`  | Snapshot of `system.params` (empty if field absent) |
-| `inputs`              | `Dict{String,Float64}`  | Global-keyed input signals |
-| `outputs`             | `Dict{String,Float64}`  | Global-keyed output signals |
-| `step_count`          | `Threads.Atomic{Int}`   | Number of completed control cycles |
-| `timestamp`           | `Float64`               | Accumulated simulated time in seconds |
-| `system_task`         | `Task`                  | Handle for `system_loop` |
-| `logger_task`         | `Task`                  | Handle for `logger_loop` |
-| `monitor_reader_task` | `Task`                  | Handle for `monitor_reader_loop` (if enabled) |
-| `monitor_writer_task` | `Task`                  | Handle for `monitor_writer_loop` (if enabled) |
-
-## Constructor
-
-```julia
-SystemRuntime(config::SystemConfig, stop_signal::StopSignal, system) -> SystemRuntime
-```
+## Optimizations (3.1)
+- `inputs`, `outputs`, `params` are `SignalBuffer` for dense vector-backed storage
+- Pre-computed `IndexPair` vectors for zero-hash copies to logger and monitor sinks
 """
 mutable struct SystemRuntime{S, IO<:AbstractIO, RAW, MON}
     config::SystemConfig{IO}
@@ -156,12 +123,13 @@ mutable struct SystemRuntime{S, IO<:AbstractIO, RAW, MON}
     logger::Logger
     monitor::MON
 
-    params::Dict{String,Float64}
+    params::SignalBuffer
     paramlock::ReentrantLock
-    inputs::Dict{String,Float64}
-    inputlock::ReentrantLock
-    outputs::Dict{String,Float64}
-    outputlock::ReentrantLock
+    inputs::SignalBuffer
+    outputs::SignalBuffer
+
+    # Cached reference to system.params (avoids hasproperty reflection per cycle)
+    _sys_params_ref::Union{Dict{String,Float64},Nothing}
 
     system_task::Task
     logger_task::Task
@@ -170,6 +138,18 @@ mutable struct SystemRuntime{S, IO<:AbstractIO, RAW, MON}
 
     step_count::Threads.Atomic{Int}
     timestamp::Float64
+
+    # Pre-computed logger pairs (3.1)
+    _logger_input_pairs::Vector{IndexPair}
+    _logger_output_pairs::Vector{IndexPair}
+    _logger_param_pairs::Vector{IndexPair}
+    _logger_time_idx::Int
+
+    # Pre-computed monitor pairs (3.1)
+    _monitor_input_pairs::Vector{IndexPair}
+    _monitor_output_pairs::Vector{IndexPair}
+    _monitor_param_pairs::Vector{IndexPair}
+    _monitor_time_idx::Int
 end
 
 function _as_float64_dict(values)::Dict{String,Float64}
@@ -186,32 +166,36 @@ function system_params(system)::Dict{String,Float64}
     return Dict{String,Float64}()
 end
 
-function _build_global_inputs(io_states::Vector{IOState{IO,RAW}})::Dict{String,Float64} where {IO,RAW}
-    global_inputs = Dict{String,Float64}()
+function _build_global_inputs(io_states::Vector{IOState{IO,RAW}})::SignalBuffer where {IO,RAW}
+    names = String[]
     for state in io_states
         is_read_enabled(state.config) || continue
-        for (local_name, global_name) in state.input_keymap
-            global_inputs[global_name] = get(state.input_local_snapshot, local_name, 0.0)
+        for (_, global_name) in state.input_keymap
+            push!(names, global_name)
         end
     end
-    return global_inputs
+    sort!(names)
+    unique!(names)
+    return SignalBuffer(names)
 end
 
-function _build_global_outputs(io_states::Vector{IOState{IO,RAW}})::Dict{String,Float64} where {IO,RAW}
-    global_outputs = Dict{String,Float64}()
+function _build_global_outputs(io_states::Vector{IOState{IO,RAW}})::SignalBuffer where {IO,RAW}
+    names = String[]
     for state in io_states
         is_write_enabled(state.config) || continue
-        for (local_name, global_name) in state.output_keymap
-            global_outputs[global_name] = get(state.output_local, local_name, 0.0)
+        for (_, global_name) in state.output_keymap
+            push!(names, global_name)
         end
     end
-    return global_outputs
+    sort!(names)
+    unique!(names)
+    return SignalBuffer(names)
 end
 
 function _build_logger_keys(
-    inputs::Dict{String,Float64},
-    outputs::Dict{String,Float64},
-    params::Dict{String,Float64},
+    inputs::AbstractDict{String,Float64},
+    outputs::AbstractDict{String,Float64},
+    params::AbstractDict{String,Float64},
 )::Vector{String}
     keys_ld = String["Time"]
     append!(keys_ld, sort(collect(keys(inputs))))
@@ -226,25 +210,62 @@ function SystemRuntime(
     stop_signal::StopSignal,
     system::S,
 ) where {S, IO<:AbstractIO, RAW}
-    params = system_params(system)
+    params_dict = system_params(system)
     inputs = _build_global_inputs(io_states)
     outputs = _build_global_outputs(io_states)
+
+    # Convert params Dict to SignalBuffer
+    params_names = sort(collect(keys(params_dict)))
+    params = SignalBuffer(params_dict, params_names)
 
     logger_keys = _build_logger_keys(inputs, outputs, params)
     logger = Logger(config.logfile, 64, logger_keys)
     writeheader(logger)
 
+    # Back-fill gather/split pairs on each IOState
+    for state in io_states
+        if is_read_enabled(state.config)
+            state._gather_pairs = compute_gather_pairs(
+                state.input_local_snapshot, state.input_keymap, inputs)
+        end
+        if is_write_enabled(state.config)
+            state._split_pairs = compute_split_pairs(
+                outputs, state.output_keymap, state.output_local)
+        end
+    end
+
+    # Pre-compute logger index pairs
+    logger_input_pairs = compute_index_pairs(inputs._index, logger.loggerdict._index, inputs.names)
+    logger_output_pairs = compute_index_pairs(outputs._index, logger.loggerdict._index, outputs.names)
+    logger_param_pairs = compute_index_pairs(params._index, logger.loggerdict._index, params.names)
+    logger_time_idx = get(logger.loggerdict._index, "Time", 0)
+
     # Build monitor if configured (uses same signal keys as logger)
     monitor = if config.monitor !== nothing
         mc = config.monitor
-        param_names = sort(collect(keys(params)))
+        param_names = sort(collect(keys(params_dict)))
         TcpMonitor(mc.host, mc.in_port, mc.out_port, param_names, logger_keys)
     else
         nothing
     end
-    # Fix monitor type parameter at construction time → SystemRuntime{S,IO,RAW,Nothing}
-    # and {S,IO,RAW,TcpMonitor} are distinct concrete types, eliminating runtime dispatch.
     MON = typeof(monitor)
+
+    # Pre-compute monitor index pairs
+    if monitor !== nothing
+        monitor_input_pairs = compute_index_pairs(inputs._index, monitor.monitordict._index, inputs.names)
+        monitor_output_pairs = compute_index_pairs(outputs._index, monitor.monitordict._index, outputs.names)
+        monitor_param_pairs = compute_index_pairs(params._index, monitor.monitordict._index, params.names)
+        monitor_time_idx = get(monitor.monitordict._index, "Time", 0)
+    else
+        monitor_input_pairs = IndexPair[]
+        monitor_output_pairs = IndexPair[]
+        monitor_param_pairs = IndexPair[]
+        monitor_time_idx = 0
+    end
+
+    # Cache direct reference to system.params (eliminates hasproperty reflection per cycle)
+    sys_params_ref = hasproperty(system, :params) ?
+        getproperty(system, :params)::Dict{String,Float64} : nothing
 
     return SystemRuntime{S,IO,RAW,MON}(
         config,
@@ -256,15 +277,22 @@ function SystemRuntime(
         params,
         ReentrantLock(),
         inputs,
-        ReentrantLock(),
         outputs,
-        ReentrantLock(),
+        sys_params_ref,
         Task(() -> nothing),
         Task(() -> nothing),
         Task(() -> nothing),
         Task(() -> nothing),
         Threads.Atomic{Int}(0),
         0.0,
+        logger_input_pairs,
+        logger_output_pairs,
+        logger_param_pairs,
+        logger_time_idx,
+        monitor_input_pairs,
+        monitor_output_pairs,
+        monitor_param_pairs,
+        monitor_time_idx,
     )
 end
 

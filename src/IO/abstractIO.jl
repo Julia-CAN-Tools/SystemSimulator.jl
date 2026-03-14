@@ -49,12 +49,12 @@ function read_raw(io::AbstractIO)
 end
 
 """
-    decode_raw!(io::AbstractIO, raw, local_inputs::Dict{String,Float64}) -> Bool
+    decode_raw!(io::AbstractIO, raw, local_inputs::AbstractDict{String,Float64}) -> Bool
 
 Decode one raw payload into `local_inputs`. Return `true` when snapshot should be
 published and `false` otherwise.
 """
-function decode_raw!(io::AbstractIO, raw, local_inputs::Dict{String,Float64})::Bool
+function decode_raw!(io::AbstractIO, raw, local_inputs::AbstractDict{String,Float64})::Bool
     error("decode_raw! not implemented for IO type: $(typeof(io))")
 end
 
@@ -95,6 +95,20 @@ function output_signal_names(io::AbstractIO)::Vector{String}
 end
 
 function Base.close(io::AbstractIO)::Nothing
+    return nothing
+end
+
+"""
+    encode_and_write!(io::AbstractIO, local_outputs) -> Nothing
+
+Encode and write outputs in a single pass. Default calls encode_raw + write_raw.
+Concrete IO types can override for zero-allocation inline encode+write.
+"""
+function encode_and_write!(io::AbstractIO, local_outputs::AbstractDict{String,<:Real})::Nothing
+    payloads = encode_raw(io, local_outputs)
+    for payload in payloads
+        write_raw(io, payload)
+    end
     return nothing
 end
 

@@ -43,7 +43,7 @@ function SS.read_raw(io::MockIO)
     return nothing
 end
 
-function SS.decode_raw!(io::MockIO, raw, local_inputs::Dict{String,Float64})::Bool
+function SS.decode_raw!(io::MockIO, raw, local_inputs::AbstractDict{String,Float64})::Bool
     io.throw_decode && throw(ErrorException("mock decode failure"))
     raw isa AbstractDict || return false
 

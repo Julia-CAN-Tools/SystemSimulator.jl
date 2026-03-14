@@ -14,9 +14,9 @@ when the buffer is full or at shutdown, minimising IO overhead during the contro
 | `counter`    | `Int64`                 | Number of rows currently in the buffer |
 | `keysLD`     | `Vector{String}`        | Ordered column names: `["Time", sorted_inputs..., sorted_outputs..., sorted_params...]` |
 | `buffer`     | `Matrix{Float64}`       | Ring buffer; shape `(lengthbuf, length(keysLD))` |
-| `loggerdict` | `Dict{String,Float64}`  | Current signal values copied from runtime each cycle |
+| `loggerdict` | `SignalBuffer`          | Current signal values copied from runtime each cycle |
 | `loggerlock` | `ReentrantLock`         | Guards `loggerdict` during copy-in and read-out |
-| `loggerflag` | `Channel{Bool}`         | Capacity-1 wakeup channel; system loop puts `true` each cycle |
+| `loggerflag` | `Base.Event`            | Wakeup event; system loop notifies each cycle |
 
 Owned and managed by `SystemRuntime`; users do not interact with `Logger` directly.
 """
@@ -27,27 +27,24 @@ mutable struct Logger
     counter::Int64
     keysLD::Vector{String}
     buffer::Matrix{Float64}
-    loggerdict::Dict{String,Float64}
+    loggerdict::SignalBuffer
     loggerlock::ReentrantLock
-    loggerflag::Channel{Bool}
+    loggerflag::Base.Event
 end
 
 function Logger(filename::String, lengthbuf::Int64, keysLD::Vector{String})
     filehandle = open(filename, "w")
-    counter = 0
-    loggerdict = Dict{String,Float64}(key => 0.0 for key in keysLD)
-    loggerlock = ReentrantLock()
-    loggerflag = Channel{Bool}(1)
+    loggerdict = SignalBuffer(copy(keysLD))
     return Logger(
         filename,
         filehandle,
         lengthbuf,
-        counter,
+        0,
         keysLD,
         Matrix{Float64}(undef, lengthbuf, length(keysLD)),
         loggerdict,
-        loggerlock,
-        loggerflag,
+        ReentrantLock(),
+        Base.Event(),
     )
 end
 
@@ -74,10 +71,10 @@ Write one numeric row to the file handle without flushing. Internal; called by `
 """
 function writerow(logger::Logger, row::AbstractVector{<:Real})
     @inbounds for val in @view row[1:end-1]
-        write(logger.filehandle, string(val))
+        print(logger.filehandle, val)
         write(logger.filehandle, ",")
     end
-    write(logger.filehandle, string(row[end]))
+    print(logger.filehandle, row[end])
     write(logger.filehandle, "\n")
 end
 
@@ -97,16 +94,17 @@ end
 """
     writeline(logger)
 
-Snapshot current `loggerdict` values into the ring buffer. If the buffer is now full,
-flush it to disk via `writematrix` and reset the counter. Driven by `logger_loop`;
-do not call directly from user code.
+Snapshot current `loggerdict` values into the ring buffer using `copyto!` from the
+SignalBuffer's dense values vector (zero hash lookups). If the buffer is now full,
+flush it to disk via `writematrix` and reset the counter.
 """
 function writeline(logger::Logger)
     logger.counter = logger.counter + 1
-    lock(logger.loggerlock) do
-        for (i, key) in enumerate(logger.keysLD)
-            logger.buffer[logger.counter, i] = logger.loggerdict[key]
-        end
+    lock(logger.loggerlock)
+    try
+        copyto!(@view(logger.buffer[logger.counter, :]), logger.loggerdict.values)
+    finally
+        unlock(logger.loggerlock)
     end
 
     if logger.counter == logger.lengthbuf

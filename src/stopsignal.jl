@@ -37,5 +37,5 @@ end
 Read the stop flag with atomic semantics.
 """
 function stop_requested(signal::StopSignal)
-    return Threads.atomic_or!(signal.flag, false)
+    return signal.flag[]
 end

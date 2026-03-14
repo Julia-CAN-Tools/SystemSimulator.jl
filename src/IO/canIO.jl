@@ -3,11 +3,15 @@
 
 CAN adapter that reuses `CANInterface` for transport and `CANUtils` message
 catalog encode/decode functions.
+
+Builds a hash index (`_rx_index`) at construction for O(1) message lookup
+in `decode_raw!` instead of linear scan.
 """
 struct CanIO{D<:CI.AbstractCanDriver,R<:CU.AbstractCanMessage,T<:CU.AbstractCanMessage} <: AbstractIO
     driver::D
     rx_catalog::Vector{R}
     tx_catalog::Vector{T}
+    _rx_index::Dict{UInt32,R}
 end
 
 function CanIO(
@@ -15,7 +19,10 @@ function CanIO(
     rx_catalog::AbstractVector{R},
     tx_catalog::AbstractVector{T},
 ) where {D<:CI.AbstractCanDriver,R<:CU.AbstractCanMessage,T<:CU.AbstractCanMessage}
-    return CanIO{D,R,T}(driver, collect(rx_catalog), collect(tx_catalog))
+    rx_vec = collect(rx_catalog)
+    tx_vec = collect(tx_catalog)
+    index = Dict{UInt32,R}(CU.message_match_key(msg) => msg for msg in rx_vec)
+    return CanIO{D,R,T}(driver, rx_vec, tx_vec, index)
 end
 
 function CanIO(
@@ -37,11 +44,11 @@ function read_raw(io::CanIO)::Union{CI.CanFrameRaw,Nothing}
     return CI.read(io.driver)
 end
 
-function decode_raw!(io::CanIO, raw::CI.CanFrameRaw, local_inputs::Dict{String,Float64})::Bool
-    isempty(io.rx_catalog) && return false
+function decode_raw!(io::CanIO, raw::CI.CanFrameRaw, local_inputs::AbstractDict{String,Float64})::Bool
+    isempty(io._rx_index) && return false
     raw.can_dlc != UInt8(8) && return false
-    frame = CU.CanFrame(raw.can_id, collect(raw.data))
-    return CU.match_and_decode!(frame, io.rx_catalog, local_inputs)
+    frame = CU.CanFrame(raw.can_id, raw.data)
+    return CU.match_and_decode!(frame, io._rx_index, local_inputs)
 end
 
 function encode_raw(io::CanIO, local_outputs::AbstractDict{String,<:Real})::Vector{CU.CanFrame}
@@ -55,6 +62,14 @@ end
 
 function write_raw(io::CanIO, payload::CU.CanFrame)::Nothing
     CI.write(io.driver, payload.canid, payload.data)
+    return nothing
+end
+
+function encode_and_write!(io::CanIO, local_outputs::AbstractDict{String,<:Real})::Nothing
+    for message in io.tx_catalog
+        frame = CU.encode(message, local_outputs)
+        CI.write(io.driver, frame.canid, frame.data)
+    end
     return nothing
 end
 

@@ -58,12 +58,11 @@ function parser_loop(state::IOState{IO,RAW}, stop_signal::StopSignal) where {IO,
         try
             matched = decode_raw!(state.config.io, raw_payload, state.input_local_rx)
             if matched
-                lock(state.inputlock)
-                try
-                    sync_dict!(state.input_local_snapshot, state.input_local_rx)
-                finally
-                    unlock(state.inputlock)
-                end
+                # SeqLock write: odd seq = writing, even seq = done
+                seq = state._snap_seq[]
+                state._snap_seq[] = seq + UInt64(1)
+                sync_dict!(state.input_local_snapshot, state.input_local_rx)
+                state._snap_seq[] = seq + UInt64(2)
             end
         catch err
             @error "Parser loop error" io = state.config.name exception = (err, catch_backtrace())
@@ -77,28 +76,23 @@ end
     writer_loop(state, stop_signal)
 
 Encodes local outputs and writes them to transport.
+Uses Base.Event instead of Channel{Bool} for zero-alloc wakeup.
+Uses encode_and_write! for zero-alloc inline encode+write.
 """
 function writer_loop(state::IOState{IO,RAW}, stop_signal::StopSignal) where {IO,RAW}
     is_write_enabled(state.config) || return nothing
     @info "Writer loop started" io = state.config.name
     while !stop_requested(stop_signal)
-        try
-            take!(state.outflag)
-        catch err
-            if err isa InvalidStateException
-                break
-            end
-            rethrow(err)
-        end
-
+        wait(state.outflag)
+        Base.reset(state.outflag)
         stop_requested(stop_signal) && break
 
         try
-            lock(state.outlock) do
-                payloads = encode_raw(state.config.io, state.output_local)
-                for payload in payloads
-                    write_raw(state.config.io, payload)
-                end
+            lock(state.outlock)
+            try
+                encode_and_write!(state.config.io, state.output_local)
+            finally
+                unlock(state.outlock)
             end
         catch err
             @error "Writer loop error" io = state.config.name exception = (err, catch_backtrace())
@@ -113,9 +107,18 @@ end
 
 Single deterministic loop that gathers snapshots, invokes system callback,
 and publishes outputs to IO writers.
+
+Optimizations applied:
+- dt_seconds cached before loop (1.3)
+- Global inputlock/outputlock removed — only system loop touches these (2.2)
+- Merged snapshot_to_sinks! replaces separate copy_to_logger!/copy_to_monitor! (2.1)
+- Precision sleep with busy-wait tail for <10μs jitter (3.3)
+- Base.Event for logger/monitor wakeup (3.4)
+- Plain store for step_count (4.4)
 """
 function system_loop(runtime::SystemRuntime{S,IO,RAW,MON}, system_callback::CF) where {S, IO<:AbstractIO, RAW, MON, CF<:Function}
     period_ns = convert(Dates.Nanosecond, Dates.Millisecond(runtime.config.dt_ms)).value
+    dt_seconds = runtime.config.dt_ms / 1.0e3
     @info "System loop started" period_ms = runtime.config.dt_ms
 
     while !stop_requested(runtime.stop_signal)
@@ -125,41 +128,46 @@ function system_loop(runtime::SystemRuntime{S,IO,RAW,MON}, system_callback::CF) 
             # Apply param updates from monitor (before gathering inputs)
             apply_monitor_params!(runtime)
 
-            lock(runtime.inputlock) do
-                gather_inputs!(runtime.inputs, runtime.io_states)
-            end
+            # No global inputlock — only system loop touches runtime.inputs
+            gather_inputs!(runtime.inputs, runtime.io_states)
 
-            lock(runtime.outputlock) do
-                system_callback(
-                    runtime.system,
-                    runtime.inputs,
-                    runtime.outputs,
-                    runtime.config.dt_ms / 1.0e3,
-                )
-            end
+            # No global outputlock — only system loop touches runtime.outputs
+            system_callback(
+                runtime.system,
+                runtime.inputs,
+                runtime.outputs,
+                dt_seconds,
+            )
 
             split_outputs!(runtime.outputs, runtime.io_states)
 
-            copy_to_logger!(runtime)
-            isready(runtime.logger.loggerflag) || put!(runtime.logger.loggerflag, true)
-
-            # Copy to monitor and signal (mirrors logger pattern)
+            # Merged snapshot: copies to both logger and monitor in one pass
+            snapshot_to_sinks!(runtime)
+            notify(runtime.logger.loggerflag)
             if runtime.monitor !== nothing
-                copy_to_monitor!(runtime)
-                isready(runtime.monitor.monitorflag) || put!(runtime.monitor.monitorflag, true)
+                notify(runtime.monitor.monitorflag)
             end
 
-            runtime.timestamp += runtime.config.dt_ms / 1.0e3
-            Threads.atomic_add!(runtime.step_count, 1)
+            runtime.timestamp += dt_seconds
+            runtime.step_count[] += 1
         catch err
             @error "System loop error" exception = (err, catch_backtrace())
         end
 
+        # Precision sleep: OS sleep for most of the remaining time,
+        # then busy-wait for the final ~1ms to achieve <10μs jitter
         elapsed_ns = Int64(time_ns() - cycle_start)
         remaining_ns = period_ns - elapsed_ns
-        remaining_ns > 0 && sleep(remaining_ns / 1.0e9)
-    end
 
+        if remaining_ns > 2_000_000  # > 2ms remaining: sleep most of it
+            sleep((remaining_ns - 1_000_000) / 1.0e9)  # sleep all but last 1ms
+        end
+
+        # Busy-wait for precise timing
+        while Int64(time_ns() - cycle_start) < period_ns
+            # spin
+        end
+    end
 
     @info "System loop exiting" total_steps = runtime.step_count[]
     return nothing
@@ -174,20 +182,10 @@ At shutdown: writes any remaining buffered rows via `writematrix`, then closes t
 function logger_loop(stop_signal::StopSignal, logger::Logger)
     @info "Logger loop started" filename = logger.filepath
 
-    while true
-        if stop_requested(stop_signal) && !isready(logger.loggerflag)
-            break
-        end
-
-        try
-            take!(logger.loggerflag)
-        catch err
-            if err isa InvalidStateException
-                break
-            end
-            rethrow(err)
-        end
-
+    while !stop_requested(stop_signal)
+        wait(logger.loggerflag)
+        Base.reset(logger.loggerflag)
+        stop_requested(stop_signal) && break
         writeline(logger)
     end
 
@@ -208,32 +206,6 @@ end
     start!(runtime, system_callback)
 
 Spawn all runtime tasks and return immediately (non-blocking).
-
-## Tasks spawned
-
-For each `IOConfig` in `runtime.config.ios`:
-- `reader_task` — blocked on `read_raw`; skipped when mode is `IO_MODE_WRITEONLY`
-- `parser_task` — drains rx queue and calls `decode_raw!`; skipped when mode is `IO_MODE_WRITEONLY`
-- `writer_task` — woken by `outflag`; skipped when mode is `IO_MODE_READONLY`
-
-Global tasks (always):
-- `system_task` — deterministic control loop at `config.dt_ms` cadence
-- `logger_task` — write-behind CSV logger
-
-Optional monitor tasks (when `config.monitor !== nothing`):
-- `monitor_reader_task` — receives param updates from GUI (when `in_port > 0`)
-- `monitor_writer_task` — streams all signals to GUI (when `out_port > 0`)
-
-## Requirements
-
-Must be run with `--threads=auto` (or `--threads=N` with N ≥ 2); `Threads.@spawn` is used
-for all tasks.
-
-## Callback signature
-
-```julia
-system_callback(system, inputs::Dict{String,Float64}, outputs::Dict{String,Float64}, dt::Float64)
-```
 """
 function start!(runtime::SystemRuntime{S,IO,RAW,MON}, system_callback::CF) where {S, IO<:AbstractIO, RAW, MON, CF<:Function}
     for state in runtime.io_states
@@ -266,21 +238,17 @@ end
 """
     stop!(runtime)
 
-Coordinated shutdown sequence. Always call `request_stop!(runtime.stop_signal)` before
-`stop!` (or use the convenience wrapper that does both).
+Coordinated shutdown sequence.
 
 ## Shutdown sequence
 
 1. Sets the stop flag via `request_stop!`
 2. Closes all IO backends so blocking `read_raw` calls return immediately
-3. Sends a wakeup value to each writer's `outflag` channel
-4. Sends a wakeup value to `logger.loggerflag`
-5. Closes monitor TCP server sockets and wakes `monitorflag`
+3. Notifies each writer's `outflag` event to wake blocked tasks
+4. Notifies `logger.loggerflag` event
+5. Closes monitor TCP server sockets and notifies `monitorflag`
 6. Sleeps 200 ms to let in-flight work drain
-7. Closes all channels (`rx_queue`, `outflag`, `loggerflag`, `monitorflag`)
-
-`stop!` does **not** `wait` on any task handles. If you need to block until the system loop
-has finished, call `wait(runtime.system_task)` after `stop!`.
+7. Closes rx_queue channels
 """
 function stop!(runtime::SystemRuntime)
     request_stop!(runtime.stop_signal)
@@ -294,35 +262,27 @@ function stop!(runtime::SystemRuntime)
         end
     end
 
+    # Wake writer tasks so they can observe stop_requested
     for state in runtime.io_states
-        if is_write_enabled(state.config) && isopen(state.outflag) && !isready(state.outflag)
-            put!(state.outflag, true)
+        if is_write_enabled(state.config)
+            notify(state.outflag)
         end
     end
 
-    if isopen(runtime.logger.loggerflag) && !isready(runtime.logger.loggerflag)
-        put!(runtime.logger.loggerflag, true)
-    end
+    # Wake logger task
+    notify(runtime.logger.loggerflag)
 
-    # Close monitor TCP resources and signal its writer
+    # Close monitor TCP resources and wake its writer
     if runtime.monitor !== nothing
         close_monitor!(runtime.monitor)
-        if isopen(runtime.monitor.monitorflag) && !isready(runtime.monitor.monitorflag)
-            put!(runtime.monitor.monitorflag, true)
-        end
+        notify(runtime.monitor.monitorflag)
     end
 
     sleep(0.2)
 
     for state in runtime.io_states
         isopen(state.rx_queue) && close(state.rx_queue)
-        isopen(state.outflag) && close(state.outflag)
     end
 
-    isopen(runtime.logger.loggerflag) && close(runtime.logger.loggerflag)
-
-    if runtime.monitor !== nothing
-        isopen(runtime.monitor.monitorflag) && close(runtime.monitor.monitorflag)
-    end
     return nothing
 end

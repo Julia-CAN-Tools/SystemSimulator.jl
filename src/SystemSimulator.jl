@@ -48,6 +48,7 @@ import Dates
 import Sockets
 
 include("stopsignal.jl")
+include("signal_buffer.jl")
 include("logger.jl")
 include("IO/abstractIO.jl")
 include("IO/canIO.jl")
@@ -61,6 +62,7 @@ include("lifecycle.jl")
 export AbstractSystem,
        AbstractIO,
        CanIO,
+       SignalBuffer,
        IO_MODE_READWRITE,
        IO_MODE_READONLY,
        IO_MODE_WRITEONLY,
@@ -87,6 +89,7 @@ export AbstractSystem,
        read_raw,
        decode_raw!,
        encode_raw,
+       encode_and_write!,
        write_raw,
        input_signal_names,
        output_signal_names,
